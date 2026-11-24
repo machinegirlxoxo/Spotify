@@ -8,6 +8,7 @@ jobs:
       - run: git apply spotify_login.patch
       - uses: subosito/flutter-action@v2
         with:
+          flutter-version: '3.38.x'
           channel: stable
           cache: true
       - uses: actions/setup-java@v4
