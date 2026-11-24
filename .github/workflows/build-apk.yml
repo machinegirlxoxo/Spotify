@@ -16,7 +16,7 @@ jobs:
           flutter-version: '3.38.x'
           channel: stable
       - name: Apply patch
-        run: git apply spotify_login_full_ui (1).patch
+        run: git apply --whitespace=nowarn "spotify_login_full_ui (1).patch"
       - run: flutter pub get
       - run: flutter build apk --release --split-per-abi
       - uses: actions/upload-artifact@v4
