@@ -8,11 +8,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Apply login patch
+      - name: Apply corrected Spotify patch
         run: git apply --whitespace=nowarn "spotify_login_full_ui (1).patch"
-
-      - name: Apply logout, speed and cover patch
-        run: git apply --whitespace=nowarn spotify_logout_speed_cover.patch
 
       - uses: subosito/flutter-action@v2
         with:
