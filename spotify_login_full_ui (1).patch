@@ -3384,34 +3384,66 @@ index ddb7353..9dd8806 100644
      return showModalBottomSheet(
        constraints: const BoxConstraints(maxWidth: 500),
 diff --git a/lib/ui/screens/Search/search_screen.dart b/lib/ui/screens/Search/search_screen.dart
-index 5567e2f..312f218 100644
 --- a/lib/ui/screens/Search/search_screen.dart
 +++ b/lib/ui/screens/Search/search_screen.dart
-@@ -3,7 +3,9 @@ import 'package:get/get.dart';
- 
- import 'components/search_item.dart';
- import '/ui/screens/Settings/settings_screen_controller.dart';
+@@ -1,152 +1,173 @@
+-import 'package:flutter/material.dart';
+-import 'package:get/get.dart';
+-
+-import 'components/search_item.dart';
+-import '/ui/screens/Settings/settings_screen_controller.dart';
 -import '../../widgets/modified_text_field.dart';
-+import '../../widgets/snackbar.dart';
-+import '../../widgets/spotify_discover.dart';
-+import '../../widgets/spotify_style.dart';
- import '/ui/navigator.dart';
- import 'search_screen_controller.dart';
- 
-@@ -14,7 +16,8 @@ class SearchScreen extends StatelessWidget {
-   Widget build(BuildContext context) {
-     final searchScreenController = Get.put(SearchScreenController());
-     final settingsScreenController = Get.find<SettingsScreenController>();
+-import '/ui/navigator.dart';
+-import 'search_screen_controller.dart';
+-
+-class SearchScreen extends StatelessWidget {
+-  const SearchScreen({super.key});
+-
+-  @override
+-  Widget build(BuildContext context) {
+-    final searchScreenController = Get.put(SearchScreenController());
+-    final settingsScreenController = Get.find<SettingsScreenController>();
 -    final topPadding = context.isLandscape ? 50.0 : 80.0;
-+    final topPadding =
-+        context.isLandscape ? 30.0 : MediaQuery.of(context).padding.top + 12;
-     return Scaffold(
-       resizeToAvoidBottomInset: false,
-       body: Obx(
-@@ -55,45 +58,78 @@ class SearchScreen extends StatelessWidget {
-                 padding: EdgeInsets.only(top: topPadding, left: 5),
-                 child: Column(
-                   children: [
+-    return Scaffold(
+-      resizeToAvoidBottomInset: false,
+-      body: Obx(
+-        () => Row(
+-          children: [
+-            settingsScreenController.isBottomNavBarEnabled.isFalse
+-                ? Container(
+-                    width: 60,
+-                    color:
+-                        Theme.of(context).navigationRailTheme.backgroundColor,
+-                    child: Column(
+-                      children: [
+-                        Padding(
+-                          padding: EdgeInsets.only(top: topPadding),
+-                          child: IconButton(
+-                            icon: Icon(
+-                              Icons.arrow_back_ios_new,
+-                              color: Theme.of(context)
+-                                  .textTheme
+-                                  .titleMedium!
+-                                  .color,
+-                            ),
+-                            onPressed: () {
+-                              Get.nestedKey(ScreenNavigationSetup.id)!
+-                                  .currentState!
+-                                  .pop();
+-                            },
+-                          ),
+-                        ),
+-                      ],
+-                    ),
+-                  )
+-                : const SizedBox(
+-                    width: 15,
+-                  ),
+-            Expanded(
+-              child: Padding(
+-                padding: EdgeInsets.only(top: topPadding, left: 5),
+-                child: Column(
+-                  children: [
 -                    Align(
 -                      alignment: Alignment.centerLeft,
 -                      child: Text(
@@ -3421,27 +3453,7 @@ index 5567e2f..312f218 100644
 -                    ),
 -                    const SizedBox(
 -                      height: 10,
-+                    Padding(
-+                      padding: const EdgeInsets.only(right: 16),
-+                      child: Row(children: [
-+                        const SpAvatar(size: 36),
-+                        const SizedBox(width: 14),
-+                        const Text('Search',
-+                            style: TextStyle(
-+                                fontSize: 28, fontWeight: FontWeight.w800)),
-+                        const Spacer(),
-+                        IconButton(
-+                            tooltip: 'Camera search',
-+                            onPressed: () {
-+                              ScaffoldMessenger.of(context).showSnackBar(
-+                                  snackbar(context,
-+                                      "Camera search isn't available here",
-+                                      size: SanckBarSize.MEDIUM));
-+                            },
-+                            icon: const Icon(Icons.photo_camera_outlined,
-+                                size: 28)),
-+                      ]),
-                     ),
+-                    ),
 -                    ModifiedTextField(
 -                      textCapitalization: TextCapitalization.sentences,
 -                      controller: searchScreenController.textInputController,
@@ -3470,82 +3482,236 @@ index 5567e2f..312f218 100644
 -                            splashRadius: 16,
 -                            iconSize: 19,
 -                          )),
-+                    const SizedBox(height: 14),
-+                    Padding(
-+                      padding: const EdgeInsets.only(right: 16),
-+                      child: TextField(
-+                        textCapitalization: TextCapitalization.sentences,
-+                        controller: searchScreenController.textInputController,
-+                        textInputAction: TextInputAction.search,
-+                        onChanged: searchScreenController.onChanged,
-+                        onSubmitted: (val) {
-+                          if (val.contains("https://")) {
-+                            searchScreenController.filterLinks(Uri.parse(val));
-+                            searchScreenController.reset();
-+                            return;
-+                          }
-+                          Get.toNamed(ScreenNavigationSetup.searchResultScreen,
-+                              id: ScreenNavigationSetup.id, arguments: val);
-+                          searchScreenController.addToHistryQueryList(val);
-+                        },
-+                        autofocus: settingsScreenController
-+                            .isBottomNavBarEnabled.isFalse,
-+                        cursorColor: Colors.black,
-+                        style: const TextStyle(
-+                            color: Colors.black,
-+                            fontSize: 16,
-+                            fontWeight: FontWeight.w600),
-+                        decoration: InputDecoration(
-+                            filled: true,
-+                            fillColor: Colors.white,
-+                            isDense: true,
-+                            contentPadding:
-+                                const EdgeInsets.symmetric(vertical: 14),
-+                            border: OutlineInputBorder(
-+                                borderRadius: BorderRadius.circular(6),
-+                                borderSide: BorderSide.none),
-+                            prefixIcon: const Icon(Icons.search_rounded,
-+                                color: Colors.black, size: 28),
-+                            hintText: 'What do you want to listen to?',
-+                            hintStyle: const TextStyle(
-+                                color: Color(0xFF6A6A6A),
-+                                fontSize: 16,
-+                                fontWeight: FontWeight.w600),
-+                            suffixIcon: IconButton(
-+                              onPressed: searchScreenController.reset,
-+                              icon: const Icon(Icons.close,
-+                                  color: Colors.black),
-+                              splashRadius: 16,
-+                              iconSize: 20,
-+                            )),
-+                      ),
-                     ),
-+                    const SizedBox(height: 6),
-                     Expanded(
-                       child: Obx(() {
-                         final isEmpty = searchScreenController
-@@ -133,11 +169,15 @@ class SearchScreen extends StatelessWidget {
-                                       ),
-                                     )
-                                   ]
+-                    ),
+-                    Expanded(
+-                      child: Obx(() {
+-                        final isEmpty = searchScreenController
+-                                .suggestionList.isEmpty ||
+-                            searchScreenController.textInputController.text ==
+-                                "";
+-                        final list = isEmpty
+-                            ? searchScreenController.historyQuerylist.toList()
+-                            : searchScreenController.suggestionList.toList();
+-                        return ListView(
+-                            padding: const EdgeInsets.only(top: 5, bottom: 400),
+-                            physics: const BouncingScrollPhysics(
+-                                parent: AlwaysScrollableScrollPhysics()),
+-                            children: searchScreenController.urlPasted.isTrue
+-                                ? [
+-                                    InkWell(
+-                                      onTap: () {
+-                                        searchScreenController.filterLinks(
+-                                            Uri.parse(searchScreenController
+-                                                .textInputController.text));
+-                                        searchScreenController.reset();
+-                                      },
+-                                      child: Padding(
+-                                        padding: const EdgeInsets.symmetric(
+-                                            vertical: 10.0),
+-                                        child: SizedBox(
+-                                          width: double.maxFinite,
+-                                          height: 60,
+-                                          child: Center(
+-                                              child: Text(
+-                                            "urlSearchDes".tr,
+-                                            style: Theme.of(context)
+-                                                .textTheme
+-                                                .titleMedium,
+-                                          )),
+-                                        ),
+-                                      ),
+-                                    )
+-                                  ]
 -                                : list
 -                                    .map((item) => SearchItem(
-+                                : [
-+                                    ...list.map((item) => SearchItem(
-                                         queryString: item,
+-                                        queryString: item,
 -                                        isHistoryString: isEmpty))
 -                                    .toList());
+-                      }),
+-                    )
+-                  ],
+-                ),
+-              ),
+-            ),
+-          ],
+-        ),
+-      ),
+-    );
+-  }
+-}
++import 'package:flutter/material.dart';
++import 'package:get/get.dart';
++
++import 'components/search_item.dart';
++import '/ui/screens/Settings/settings_screen_controller.dart';
++import '../../widgets/snackbar.dart';
++import '../../widgets/spotify_discover.dart';
++import '/ui/navigator.dart';
++import 'search_screen_controller.dart';
++
++class SearchScreen extends StatelessWidget {
++  const SearchScreen({super.key});
++
++  @override
++  Widget build(BuildContext context) {
++    final searchScreenController = Get.put(SearchScreenController());
++    final settingsScreenController = Get.find<SettingsScreenController>();
++    final topPadding = MediaQuery.of(context).padding.top + 8;
++    return Scaffold(
++      resizeToAvoidBottomInset: false,
++      body: Obx(
++        () => Row(
++          children: [
++            settingsScreenController.isBottomNavBarEnabled.isFalse
++                ? SizedBox(
++                    width: 60,
++                    child: Padding(
++                      padding: EdgeInsets.only(top: topPadding),
++                      child: IconButton(
++                        icon: Icon(
++                          Icons.arrow_back_ios_new,
++                          color: Theme.of(context).textTheme.titleMedium!.color,
++                        ),
++                        onPressed: () {
++                          Get.nestedKey(ScreenNavigationSetup.id)!
++                              .currentState!
++                              .pop();
++                        },
++                      ),
++                    ),
++                  )
++                : const SizedBox(width: 0),
++            Expanded(
++              child: Padding(
++                padding: EdgeInsets.only(top: topPadding, left: 0),
++                child: Column(
++                  children: [
++                    Container(
++                      height: 56,
++                      margin: const EdgeInsets.only(right: 14),
++                      padding: const EdgeInsets.symmetric(horizontal: 8),
++                      decoration: const BoxDecoration(
++                        color: Color(0xFF292929),
++                      ),
++                      child: Row(
++                        children: [
++                          if (settingsScreenController
++                              .isBottomNavBarEnabled.isTrue)
++                            IconButton(
++                              onPressed: () {
++                                Get.nestedKey(ScreenNavigationSetup.id)!
++                                    .currentState!
++                                    .pop();
++                              },
++                              icon: const Icon(Icons.arrow_back_ios_new,
++                                  color: Colors.white),
++                            ),
++                          Expanded(
++                            child: TextField(
++                              textCapitalization: TextCapitalization.sentences,
++                              controller:
++                                  searchScreenController.textInputController,
++                              textInputAction: TextInputAction.search,
++                              onChanged: searchScreenController.onChanged,
++                              onSubmitted: (val) {
++                                if (val.contains("https://")) {
++                                  searchScreenController
++                                      .filterLinks(Uri.parse(val));
++                                  searchScreenController.reset();
++                                  return;
++                                }
++                                Get.toNamed(
++                                    ScreenNavigationSetup.searchResultScreen,
++                                    id: ScreenNavigationSetup.id,
++                                    arguments: val);
++                                searchScreenController.addToHistryQueryList(val);
++                              },
++                              autofocus: settingsScreenController
++                                  .isBottomNavBarEnabled.isFalse,
++                              cursorColor: Colors.white,
++                              style: const TextStyle(
++                                  color: Colors.white, fontSize: 18),
++                              decoration: const InputDecoration(
++                                border: InputBorder.none,
++                                hintText: 'Search',
++                                hintStyle: TextStyle(color: Colors.white70),
++                                isDense: true,
++                              ),
++                            ),
++                          ),
++                          IconButton(
++                            onPressed: searchScreenController.reset,
++                            icon: const Icon(Icons.close, color: Colors.white),
++                            splashRadius: 18,
++                          ),
++                        ],
++                      ),
++                    ),
++                    Expanded(
++                      child: Obx(() {
++                        final isEmpty = searchScreenController
++                                .suggestionList.isEmpty ||
++                            searchScreenController.textInputController.text ==
++                                "";
++                        final list = isEmpty
++                            ? searchScreenController.historyQuerylist.toList()
++                            : searchScreenController.suggestionList.toList();
++                        return ListView(
++                          padding: const EdgeInsets.only(top: 5, bottom: 400),
++                          physics: const BouncingScrollPhysics(
++                              parent: AlwaysScrollableScrollPhysics()),
++                          children: searchScreenController.urlPasted.isTrue
++                              ? [
++                                  InkWell(
++                                    onTap: () {
++                                      searchScreenController.filterLinks(
++                                          Uri.parse(searchScreenController
++                                              .textInputController.text));
++                                      searchScreenController.reset();
++                                    },
++                                    child: Padding(
++                                      padding: const EdgeInsets.symmetric(
++                                          vertical: 10.0),
++                                      child: SizedBox(
++                                        width: double.maxFinite,
++                                        height: 60,
++                                        child: Center(
++                                          child: Text(
++                                            "urlSearchDes".tr,
++                                            style: Theme.of(context)
++                                                .textTheme
++                                                .titleMedium,
++                                          ),
++                                        ),
++                                      ),
++                                    ),
++                                  )
++                                ]
++                              : [
++                                  ...list.map((item) => SearchItem(
++                                        queryString: item,
 +                                        isHistoryString: isEmpty,
 +                                        searchPrefix: searchScreenController
-+                                            .textInputController.text)),
-+                                    if (searchScreenController
-+                                            .textInputController.text ==
-+                                        "")
-+                                      const SpotifyDiscover(),
-+                                  ]);
-                       }),
-                     )
-                   ],
++                                            .textInputController.text,
++                                      )),
++                                  if (searchScreenController
++                                          .textInputController.text ==
++                                      "")
++                                    const SpotifyDiscover(),
++                                ],
++                        );
++                      }),
++                    ),
++                  ],
++                ),
++              ),
++            ),
++          ],
++        ),
++      ),
++    );
++  }
++}
 diff --git a/lib/ui/screens/Settings/settings_screen.dart b/lib/ui/screens/Settings/settings_screen.dart
 index 366188d..b593408 100644
 --- a/lib/ui/screens/Settings/settings_screen.dart
