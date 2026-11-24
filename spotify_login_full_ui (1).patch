@@ -5539,7 +5539,7 @@ diff --git a/lib/ui/widgets/song_list_tile.dart b/lib/ui/widgets/song_list_tile.
 -        ));
 -  }
 -}
-+import 'package:audio_service/audio_service.dart' show MediaItem;
++import 'package:audio_service/audio_service.dart' show MediaItem, PlayButtonState;
 +import 'package:flutter/gestures.dart';
 +import 'package:flutter/material.dart';
 +import 'package:flutter_slidable/flutter_slidable.dart';
