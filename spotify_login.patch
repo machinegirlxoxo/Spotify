@@ -1,0 +1,637 @@
+diff --git a/lib/main.dart b/lib/main.dart
+index 3c898d2..885e8c3 100644
+--- a/lib/main.dart
++++ b/lib/main.dart
+@@ -1,5 +1,6 @@
+ import 'package:audio_service/audio_service.dart';
+ import 'package:flutter/material.dart';
++import '/services/spotify_service.dart';
+ import 'package:flutter/services.dart';
+ import 'package:get/get.dart';
+ import 'package:hive_flutter/hive_flutter.dart';
+@@ -91,6 +92,7 @@ Future<void> startApplicationServices() async {
+   Get.lazyPut(() => LibraryPlaylistsController(), fenix: true);
+   Get.lazyPut(() => LibraryAlbumsController(), fenix: true);
+   Get.lazyPut(() => LibraryArtistsController(), fenix: true);
++  Get.put(SpotifyService(), permanent: true);
+   Get.lazyPut(() => SettingsScreenController(), fenix: true);
+   Get.lazyPut(() => Downloader(), fenix: true);
+   if (GetPlatform.isDesktop) {
+diff --git a/lib/services/spotify_service.dart b/lib/services/spotify_service.dart
+new file mode 100644
+index 0000000..ce706fd
+--- /dev/null
++++ b/lib/services/spotify_service.dart
+@@ -0,0 +1,385 @@
++import 'dart:async';
++import 'dart:convert';
++import 'dart:io';
++import 'dart:math';
++
++import 'package:audio_service/audio_service.dart';
++import 'package:crypto/crypto.dart';
++import 'package:dio/dio.dart';
++import 'package:get/get.dart';
++import 'package:hive/hive.dart';
++import 'package:url_launcher/url_launcher.dart';
++
++import '../models/album.dart';
++import '../models/artist.dart';
++import '../models/media_Item_builder.dart';
++import '../models/playlist.dart';
++import '../ui/screens/Library/library_controller.dart';
++import '../utils/helper.dart';
++import 'music_service.dart';
++
++/// Logs into Spotify with the official OAuth (PKCE) flow, reads the user's
++/// library through the Spotify Web API, and maps every track / album / artist
++/// to its YouTube Music equivalent so the app can stream it like any other song.
++class SpotifyService extends GetxService {
++  static const _redirectPort = 8888;
++  static const redirectUri = 'http://127.0.0.1:$_redirectPort/callback';
++  static const _scopes =
++      'playlist-read-private playlist-read-collaborative user-library-read user-follow-read';
++  static const _api = 'https://api.spotify.com/v1';
++
++  final _dio = Dio();
++  final isLoggedIn = false.obs;
++  final isImporting = false.obs;
++  final progress = 0.0.obs;
++  final status = ''.obs;
++
++  Box get _box => Hive.box('AppPrefs');
++  Map get _data => (_box.get('spotify') ?? {}) as Map;
++  void _save(Map m) => _box.put('spotify', {..._data, ...m});
++
++  String get clientId => (_data['clientId'] ?? '') as String;
++  bool get skipped => (_data['skipped'] ?? false) as bool;
++  bool get needsLogin => !isLoggedIn.value && !skipped;
++
++  @override
++  void onInit() {
++    isLoggedIn.value = ((_data['refreshToken'] ?? '') as String).isNotEmpty;
++    super.onInit();
++  }
++
++  void setClientId(String id) => _save({'clientId': id.trim()});
++  void skip() => _save({'skipped': true});
++
++  void logout() {
++    _save({'accessToken': '', 'refreshToken': '', 'expiresAt': 0, 'skipped': false});
++    isLoggedIn.value = false;
++  }
++
++  // ---------------------------------------------------------------- login --
++  Future<String?> login() async {
++    if (clientId.isEmpty) return 'Enter your Spotify Client ID first';
++    final verifier = _randomString(64);
++    final challenge =
++        base64UrlEncode(sha256.convert(utf8.encode(verifier)).bytes)
++            .replaceAll('=', '');
++    final state = _randomString(16);
++
++    HttpServer server;
++    try {
++      server = await HttpServer.bind(InternetAddress.loopbackIPv4, _redirectPort);
++    } catch (e) {
++      return 'Port $_redirectPort is busy, close other apps and retry';
++    }
++
++    final authUrl = Uri.https('accounts.spotify.com', '/authorize', {
++      'client_id': clientId,
++      'response_type': 'code',
++      'redirect_uri': redirectUri,
++      'scope': _scopes,
++      'code_challenge_method': 'S256',
++      'code_challenge': challenge,
++      'state': state,
++    });
++    await launchUrl(authUrl, mode: LaunchMode.externalApplication);
++
++    String? code;
++    String? error;
++    try {
++      final req = await server.first.timeout(const Duration(minutes: 3));
++      final q = req.uri.queryParameters;
++      if (q['state'] != state) {
++        error = 'Login state mismatch';
++      } else if (q['error'] != null) {
++        error = 'Spotify: ${q['error']}';
++      } else {
++        code = q['code'];
++      }
++      req.response
++        ..headers.contentType = ContentType.html
++        ..write('<html><body style="font-family:sans-serif;text-align:center;'
++            'margin-top:20vh"><h2>Logged in</h2>You can close this tab and '
++            'go back to the app.</body></html>');
++      await req.response.close();
++    } on TimeoutException {
++      error = 'Login timed out';
++    } finally {
++      await server.close(force: true);
++    }
++    if (code == null) return error ?? 'Login cancelled';
++
++    try {
++      final res = await _dio.post('https://accounts.spotify.com/api/token',
++          data: {
++            'grant_type': 'authorization_code',
++            'code': code,
++            'redirect_uri': redirectUri,
++            'client_id': clientId,
++            'code_verifier': verifier,
++          },
++          options: Options(contentType: Headers.formUrlEncodedContentType));
++      _storeTokens(res.data);
++      isLoggedIn.value = true;
++      return null;
++    } on DioException catch (e) {
++      return 'Token error: ${e.response?.data ?? e.message}';
++    }
++  }
++
++  void _storeTokens(Map d) {
++    _save({
++      'accessToken': d['access_token'],
++      if (d['refresh_token'] != null) 'refreshToken': d['refresh_token'],
++      'expiresAt':
++          DateTime.now().millisecondsSinceEpoch + ((d['expires_in'] ?? 3600) as int) * 1000 - 60000,
++    });
++  }
++
++  Future<String> _token() async {
++    if (DateTime.now().millisecondsSinceEpoch >= ((_data['expiresAt'] ?? 0) as int)) {
++      final res = await _dio.post('https://accounts.spotify.com/api/token',
++          data: {
++            'grant_type': 'refresh_token',
++            'refresh_token': _data['refreshToken'],
++            'client_id': clientId,
++          },
++          options: Options(contentType: Headers.formUrlEncodedContentType));
++      _storeTokens(res.data);
++    }
++    return _data['accessToken'] as String;
++  }
++
++  Future<dynamic> _get(String urlOrPath, {Map<String, dynamic>? query}) async {
++    final url = urlOrPath.startsWith('http') ? urlOrPath : '$_api$urlOrPath';
++    for (var attempt = 0; attempt < 4; attempt++) {
++      try {
++        final res = await _dio.get(url,
++            queryParameters: query,
++            options: Options(headers: {'Authorization': 'Bearer ${await _token()}'}));
++        return res.data;
++      } on DioException catch (e) {
++        if (e.response?.statusCode == 429) {
++          final wait = int.tryParse('${e.response?.headers.value('retry-after')}') ?? 2;
++          await Future.delayed(Duration(seconds: wait + 1));
++          continue;
++        }
++        rethrow;
++      }
++    }
++    return null;
++  }
++
++  /// Follows Spotify's `next` links and returns every item of a paged list.
++  Future<List> _paged(String path, {Map<String, dynamic>? query, String? key}) async {
++    final out = [];
++    dynamic page = await _get(path, query: {'limit': 50, ...?query});
++    while (page != null) {
++      final holder = key != null ? page[key] : page;
++      out.addAll((holder['items'] ?? []) as List);
++      final next = holder['next'];
++      page = next == null ? null : await _get(next as String);
++      if (page != null && key != null && page[key] == null) break;
++    }
++    return out;
++  }
++
++  // --------------------------------------------------------------- import --
++  Future<String?> importLibrary() async {
++    if (isImporting.value) return null;
++    isImporting.value = true;
++    progress.value = 0;
++    try {
++      status.value = 'Reading your Spotify library…';
++      final playlists = await _paged('/me/playlists');
++      final liked = await _paged('/me/tracks');
++      final albums = await _paged('/me/albums');
++      final artists = await _paged('/me/following',
++          query: {'type': 'artist'}, key: 'artists');
++
++      final jobs = <Future<void> Function()>[];
++      final totalSteps = playlists.length + 1 + albums.length + artists.length;
++      var done = 0;
++      void tick(String s) {
++        done++;
++        progress.value = done / max(totalSteps, 1);
++        status.value = s;
++      }
++
++      // Liked songs
++      jobs.add(() async {
++        await _importTrackList('LIBSP_liked', 'Spotify Liked Songs',
++            liked.map((e) => e['track'] ?? e['item']).toList(), null);
++        tick('Liked Songs');
++      });
++
++      for (final p in playlists) {
++        if (p == null) continue;
++        jobs.add(() async {
++          List items = [];
++          try {
++            // Spotify renamed /tracks to /items in 2026; only works for
++            // playlists you own or collaborate on.
++            items = await _paged('/playlists/${p['id']}/items');
++          } on DioException {
++            items = [];
++          }
++          final tracks = items.map((e) => e['item'] ?? e['track']).toList();
++          final images = (p['images'] ?? []) as List;
++          await _importTrackList('LIBSP_${p['id']}', p['name'] ?? 'Playlist',
++              tracks, images.isNotEmpty ? images[0]['url'] : null);
++          tick(p['name'] ?? 'Playlist');
++        });
++      }
++
++      for (final a in albums) {
++        jobs.add(() async {
++          final al = a['album'];
++          await _importAlbum(al['name'], (al['artists'] as List).isNotEmpty ? al['artists'][0]['name'] : '');
++          tick(al['name']);
++        });
++      }
++      for (final a in artists) {
++        jobs.add(() async {
++          await _importArtist(a['name']);
++          tick(a['name']);
++        });
++      }
++
++      // Run a few at a time to be quick without hammering YouTube Music.
++      final queue = List.of(jobs);
++      await Future.wait(List.generate(4, (_) async {
++        while (queue.isNotEmpty) {
++          final job = queue.removeAt(0);
++          try {
++            await job();
++          } catch (e) {
++            printERROR('Spotify import step failed: $e');
++            done++;
++          }
++        }
++      }));
++
++      _refreshControllers();
++      status.value = 'Done';
++      return null;
++    } on DioException catch (e) {
++      return 'Spotify error ${e.response?.statusCode}: ${e.response?.data ?? e.message}';
++    } finally {
++      isImporting.value = false;
++    }
++  }
++
++  Future<void> _importTrackList(
++      String playlistId, String title, List tracks, String? cover) async {
++    final matched = <MediaItem>[];
++    final matchBox = await Hive.openBox('SpotifyMatches');
++    for (final t in tracks) {
++      if (t == null || t['id'] == null || t['is_local'] == true) continue;
++      final cached = matchBox.get(t['id']);
++      if (cached != null) {
++        matched.add(MediaItemBuilder.fromJson(cached));
++        continue;
++      }
++      final item = await _matchTrack(t);
++      if (item != null) {
++        matchBox.put(t['id'], MediaItemBuilder.toJson(item));
++        matched.add(item);
++      }
++    }
++    if (matched.isEmpty && tracks.isNotEmpty) return;
++
++    final listBox = await Hive.openBox(playlistId);
++    await listBox.clear();
++    for (final m in matched) {
++      await listBox.add(MediaItemBuilder.toJson(m));
++    }
++    await listBox.close();
++
++    final plBox = await Hive.openBox('LibraryPlaylists');
++    await plBox.put(
++        playlistId,
++        Playlist(
++                title: title,
++                playlistId: playlistId,
++                description: 'Spotify',
++                thumbnailUrl: cover ??
++                    (matched.isNotEmpty
++                        ? matched.first.artUri.toString()
++                        : Playlist.thumbPlaceholderUrl),
++                isCloudPlaylist: false)
++            .toJson());
++    await plBox.close();
++  }
++
++  Future<MediaItem?> _matchTrack(Map t) async {
++    final artist = (t['artists'] as List).isNotEmpty ? t['artists'][0]['name'] : '';
++    final query = '${t['name']} $artist';
++    final spDuration = ((t['duration_ms'] ?? 0) as int) ~/ 1000;
++    try {
++      final res = await Get.find<MusicServices>()
++          .search(query, filter: 'songs', limit: 5);
++      final list = _firstList(res).whereType<MediaItem>().toList();
++      if (list.isEmpty) return null;
++      if (spDuration > 0) {
++        for (final c in list) {
++          final d = c.duration?.inSeconds;
++          if (d != null && (d - spDuration).abs() <= 5) return c;
++        }
++      }
++      return list.first;
++    } catch (_) {
++      return null;
++    }
++  }
++
++  Future<void> _importAlbum(String name, String artist) async {
++    final res = await Get.find<MusicServices>()
++        .search('$name $artist', filter: 'albums', limit: 3);
++    final album = _firstList(res).whereType<Album>().firstOrNull;
++    if (album == null) return;
++    final box = await Hive.openBox('LibraryAlbums');
++    await box.put(album.browseId, album.toJson());
++    await box.close();
++  }
++
++  Future<void> _importArtist(String name) async {
++    final res = await Get.find<MusicServices>()
++        .search(name, filter: 'artists', limit: 3);
++    final list = _firstList(res).whereType<Artist>().toList();
++    if (list.isEmpty) return;
++    final exact = list.firstWhere(
++        (a) => a.name.toLowerCase() == name.toLowerCase(),
++        orElse: () => list.first);
++    final box = await Hive.openBox('LibraryArtists');
++    await box.put(exact.browseId, exact.toJson());
++    await box.close();
++  }
++
++  List _firstList(Map<String, dynamic> res) {
++    for (final e in res.entries) {
++      if (e.key != 'params' && e.key != 'searchEndpoint' && e.value is List) {
++        return e.value as List;
++      }
++    }
++    return [];
++  }
++
++  void _refreshControllers() {
++    if (Get.isRegistered<LibraryPlaylistsController>()) {
++      Get.find<LibraryPlaylistsController>().refreshLib();
++    }
++    if (Get.isRegistered<LibraryAlbumsController>()) {
++      Get.find<LibraryAlbumsController>().refreshLib();
++    }
++    if (Get.isRegistered<LibraryArtistsController>()) {
++      Get.find<LibraryArtistsController>().refreshLib();
++    }
++  }
++
++  String _randomString(int n) {
++    const chars =
++        'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~';
++    final r = Random.secure();
++    return List.generate(n, (_) => chars[r.nextInt(chars.length)]).join();
++  }
++}
+diff --git a/lib/ui/home.dart b/lib/ui/home.dart
+index 8e831a8..3a732c1 100644
+--- a/lib/ui/home.dart
++++ b/lib/ui/home.dart
+@@ -15,6 +15,7 @@ import 'widgets/bottom_nav_bar.dart';
+ import 'widgets/scroll_to_hide.dart';
+ import 'widgets/sliding_up_panel.dart';
+ import 'widgets/snackbar.dart';
++import 'widgets/spotify_login_dialog.dart';
+ import 'widgets/up_next_queue.dart';
+ 
+ class Home extends StatelessWidget {
+@@ -23,6 +24,7 @@ class Home extends StatelessWidget {
+   @override
+   Widget build(BuildContext context) {
+     printINFO("Home");
++    SpotifyLoginDialog.showIfNeeded(context);
+     final PlayerController playerController = Get.find<PlayerController>();
+     final settingsScreenController = Get.find<SettingsScreenController>();
+     final homeScreenController = Get.find<HomeScreenController>();
+diff --git a/lib/ui/screens/Settings/settings_screen.dart b/lib/ui/screens/Settings/settings_screen.dart
+index 366188d..55e9d99 100644
+--- a/lib/ui/screens/Settings/settings_screen.dart
++++ b/lib/ui/screens/Settings/settings_screen.dart
+@@ -12,6 +12,8 @@ import '../../widgets/restore_dialog.dart';
+ import '../Library/library_controller.dart';
+ import '../../widgets/snackbar.dart';
+ import '/ui/widgets/link_piped.dart';
++import '/ui/widgets/spotify_login_dialog.dart';
++import '/services/spotify_service.dart';
+ import '/services/music_service.dart';
+ import '/ui/player/player_controller.dart';
+ import '/ui/utils/theme_controller.dart';
+@@ -260,6 +262,42 @@ class SettingsScreen extends StatelessWidget {
+                               onChanged:
+                                   settingsController.toggleCacheHomeScreenData),
+                         )),
++                    ListTile(
++                      contentPadding:
++                          const EdgeInsets.only(left: 5, right: 10, top: 0),
++                      title: const Text("Spotify"),
++                      subtitle: Text(
++                          "Import your Spotify playlists, albums and artists",
++                          style: Theme.of(context).textTheme.bodyMedium),
++                      trailing: Obx(() {
++                        final sp = Get.find<SpotifyService>();
++                        return TextButton(
++                            child: Text(
++                                sp.isLoggedIn.value ? "Re-sync" : "Log in",
++                                style: Theme.of(context)
++                                    .textTheme
++                                    .titleMedium!
++                                    .copyWith(fontSize: 15)),
++                            onPressed: () async {
++                              if (sp.isLoggedIn.value) {
++                                ScaffoldMessenger.of(context).showSnackBar(
++                                    snackbar(context, "Syncing Spotify in background…",
++                                        size: SanckBarSize.BIG));
++                                final err = await sp.importLibrary();
++                                if (context.mounted) {
++                                  ScaffoldMessenger.of(context).showSnackBar(
++                                      snackbar(context, err ?? "Spotify sync done",
++                                          size: SanckBarSize.BIG));
++                                }
++                              } else {
++                                showDialog(
++                                    context: context,
++                                    barrierDismissible: false,
++                                    builder: (_) => const SpotifyLoginDialog());
++                              }
++                            });
++                      }),
++                    ),
+                     ListTile(
+                       contentPadding:
+                           const EdgeInsets.only(left: 5, right: 10, top: 0),
+diff --git a/lib/ui/widgets/spotify_login_dialog.dart b/lib/ui/widgets/spotify_login_dialog.dart
+new file mode 100644
+index 0000000..cdf879c
+--- /dev/null
++++ b/lib/ui/widgets/spotify_login_dialog.dart
+@@ -0,0 +1,133 @@
++import 'package:flutter/material.dart';
++import 'package:get/get.dart';
++import 'package:url_launcher/url_launcher.dart';
++
++import '../../services/spotify_service.dart';
++
++/// Asks the user to log in with Spotify, then imports their library.
++class SpotifyLoginDialog extends StatefulWidget {
++  const SpotifyLoginDialog({super.key});
++
++  static bool _shownThisSession = false;
++
++  /// Shown once on launch until the user logs in or taps "Skip".
++  static void showIfNeeded(BuildContext context) {
++    final sp = Get.find<SpotifyService>();
++    if (_shownThisSession || !sp.needsLogin) return;
++    _shownThisSession = true;
++    WidgetsBinding.instance.addPostFrameCallback((_) {
++      if (context.mounted) {
++        showDialog(
++            context: context,
++            barrierDismissible: false,
++            builder: (_) => const SpotifyLoginDialog());
++      }
++    });
++  }
++
++  @override
++  State<SpotifyLoginDialog> createState() => _SpotifyLoginDialogState();
++}
++
++class _SpotifyLoginDialogState extends State<SpotifyLoginDialog> {
++  final sp = Get.find<SpotifyService>();
++  late final idController = TextEditingController(text: sp.clientId);
++  String? error;
++  bool busy = false;
++
++  Future<void> _login() async {
++    setState(() {
++      busy = true;
++      error = null;
++    });
++    sp.setClientId(idController.text);
++    final err = await sp.login();
++    if (err != null) {
++      setState(() {
++        busy = false;
++        error = err;
++      });
++      return;
++    }
++    final importErr = await sp.importLibrary();
++    if (!mounted) return;
++    if (importErr != null) {
++      setState(() {
++        busy = false;
++        error = importErr;
++      });
++    } else {
++      Navigator.of(context).pop();
++    }
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    return Dialog(
++      child: Padding(
++        padding: const EdgeInsets.all(24),
++        child: SingleChildScrollView(
++          child: Obx(() {
++            if (sp.isImporting.value) {
++              return Column(mainAxisSize: MainAxisSize.min, children: [
++                Text('Importing from Spotify',
++                    style: Theme.of(context).textTheme.titleLarge),
++                const SizedBox(height: 20),
++                LinearProgressIndicator(value: sp.progress.value),
++                const SizedBox(height: 12),
++                Text(sp.status.value,
++                    maxLines: 1, overflow: TextOverflow.ellipsis),
++                const SizedBox(height: 8),
++                Text('Matching every track to YouTube Music. This can take a '
++                    'few minutes the first time.',
++                    style: Theme.of(context).textTheme.bodySmall),
++              ]);
++            }
++            return Column(mainAxisSize: MainAxisSize.min, children: [
++              Text('Log in with Spotify',
++                  style: Theme.of(context).textTheme.titleLarge),
++              const SizedBox(height: 12),
++              Text('Your playlists, liked songs, albums and artists will be '
++                  'imported. Audio is still streamed from YouTube Music.',
++                  style: Theme.of(context).textTheme.bodyMedium),
++              const SizedBox(height: 16),
++              TextField(
++                controller: idController,
++                decoration: const InputDecoration(
++                    labelText: 'Spotify Client ID',
++                    helperText: 'Free: create an app at developer.spotify.com'),
++              ),
++              const SizedBox(height: 6),
++              SelectableText('Redirect URI to add there:\n${SpotifyService.redirectUri}',
++                  style: Theme.of(context).textTheme.bodySmall),
++              TextButton(
++                  onPressed: () => launchUrl(
++                      Uri.parse('https://developer.spotify.com/dashboard'),
++                      mode: LaunchMode.externalApplication),
++                  child: const Text('Open Spotify dashboard')),
++              if (error != null)
++                Padding(
++                  padding: const EdgeInsets.only(top: 6),
++                  child: Text(error!, style: const TextStyle(color: Colors.redAccent)),
++                ),
++              const SizedBox(height: 10),
++              Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
++                TextButton(
++                    onPressed: busy
++                        ? null
++                        : () {
++                            sp.skip();
++                            Navigator.of(context).pop();
++                          },
++                    child: const Text('Skip')),
++                FilledButton(
++                    onPressed: busy ? null : _login,
++                    child: Text(busy ? 'Waiting for browser…' : 'Log in')),
++              ]),
++            ]);
++          }),
++        ),
++      ),
++    );
++  }
++}
+diff --git a/pubspec.yaml b/pubspec.yaml
+index 6cfbdfa..0c6bf63 100644
+--- a/pubspec.yaml
++++ b/pubspec.yaml
+@@ -37,6 +37,7 @@ dependencies:
+   audiotags: ^1.4.1
+   buttons_tabbar: ^1.3.13
+   cached_network_image: ^3.4.0
++  crypto: ^3.0.3
+   dio: ^5.7.0
+   file_picker: ^8.0.6
+   flutter:
