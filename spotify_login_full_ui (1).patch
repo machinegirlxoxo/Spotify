@@ -3386,7 +3386,7 @@ index ddb7353..9dd8806 100644
 diff --git a/lib/ui/screens/Search/search_screen.dart b/lib/ui/screens/Search/search_screen.dart
 --- a/lib/ui/screens/Search/search_screen.dart
 +++ b/lib/ui/screens/Search/search_screen.dart
-@@ -1,152 +1,173 @@
+@@ -1,152 +1,181 @@
 -import 'package:flutter/material.dart';
 -import 'package:get/get.dart';
 -
@@ -3543,6 +3543,7 @@ diff --git a/lib/ui/screens/Search/search_screen.dart b/lib/ui/screens/Search/se
 +import 'package:get/get.dart';
 +
 +import 'components/search_item.dart';
++import 'components/search_preview.dart';
 +import '/ui/screens/Settings/settings_screen_controller.dart';
 +import '../../widgets/snackbar.dart';
 +import '../../widgets/spotify_discover.dart';
@@ -3694,6 +3695,13 @@ diff --git a/lib/ui/screens/Search/search_screen.dart b/lib/ui/screens/Search/se
 +                                        searchPrefix: searchScreenController
 +                                            .textInputController.text,
 +                                      )),
++                                  if (!isEmpty &&
++                                      searchScreenController
++                                          .searchPreviewResults.isNotEmpty)
++                                    SearchPreview(
++                                      results: searchScreenController
++                                          .searchPreviewResults,
++                                    ),
 +                                  if (searchScreenController
 +                                          .textInputController.text ==
 +                                      "")
@@ -6132,4 +6140,288 @@ diff --git a/lib/ui/screens/Search/search_result_screen_v2.dart b/lib/ui/screens
 +          )),
 +    );
 +  }
++}
+
+diff --git a/lib/ui/screens/Search/search_screen_controller.dart b/lib/ui/screens/Search/search_screen_controller.dart
+--- a/lib/ui/screens/Search/search_screen_controller.dart
++++ b/lib/ui/screens/Search/search_screen_controller.dart
+@@ -1,86 +1,115 @@
+-import 'package:flutter/material.dart';
+-import 'package:get/get.dart';
+-import 'package:hive/hive.dart';
+-
+-import '/utils/app_link_controller.dart' show ProcessLink;
+-import '/services/music_service.dart';
+-
+-class SearchScreenController extends GetxController with ProcessLink {
+-  final textInputController = TextEditingController();
+-  final musicServices = Get.find<MusicServices>();
+-  final suggestionList = [].obs;
+-  final historyQuerylist = [].obs;
+-  late Box<dynamic> queryBox;
+-  final urlPasted = false.obs;
+-
+-  // Desktop search bar related
+-  final focusNode = FocusNode();
+-  final isSearchBarInFocus = false.obs;
+-
+-  @override
+-  onInit() {
+-    _init();
+-    super.onInit();
+-  }
+-
+-  _init() async {
+-    if(GetPlatform.isDesktop){
+-      focusNode.addListener((){
+-        isSearchBarInFocus.value = focusNode.hasFocus;
+-      });
+-    }
+-    queryBox = await Hive.openBox("searchQuery");
+-    historyQuerylist.value = queryBox.values.toList().reversed.toList();
+-  }
+-
+-  Future<void> onChanged(String text) async {
+-    if(text.contains("https://")){
+-      urlPasted.value = true; 
+-      return;
+-    }
+-    urlPasted.value = false;
+-    suggestionList.value = await musicServices.getSearchSuggestion(text);
+-  }
+-
+-  Future<void> suggestionInput(String txt) async {
+-    textInputController.text = txt;
+-    textInputController.selection =
+-        TextSelection.collapsed(offset: textInputController.text.length);
+-    await onChanged(txt);
+-  }
+-
+-  Future<void> addToHistryQueryList(String txt) async {
+-    if (historyQuerylist.length > 9) {
+-      final queryForRemoval = queryBox.getAt(0);
+-      await queryBox.deleteAt(0);
+-      historyQuerylist.removeWhere((element) => element == queryForRemoval);
+-    }
+-    if (!historyQuerylist.contains(txt)) {
+-      await queryBox.add(txt);
+-      historyQuerylist.insert(0, txt);
+-    }
+-
+-    //reset current query and suggestionlist
+-    reset();
+-  }
+-
+-  void reset() {
+-    urlPasted.value = false;
+-    textInputController.text = "";
+-    suggestionList.clear();
+-  }
+-
+-  Future<void> removeQueryFromHistory(String txt) async {
+-    final index = queryBox.values.toList().indexOf(txt);
+-    await queryBox.deleteAt(index);
+-    historyQuerylist.remove(txt);
+-  }
+-
+-  @override
+-  void dispose() {
+-    focusNode.dispose();
+-    textInputController.dispose();
+-    queryBox.close();
+-    super.dispose();
+-  }
+-}
++import 'package:flutter/material.dart';
++import 'package:get/get.dart';
++import 'package:hive/hive.dart';
++
++import '/utils/app_link_controller.dart' show ProcessLink;
++import '/services/music_service.dart';
++
++class SearchScreenController extends GetxController with ProcessLink {
++  final textInputController = TextEditingController();
++  final musicServices = Get.find<MusicServices>();
++  final suggestionList = [].obs;
++  final searchPreviewResults = <String, dynamic>{}.obs;
++  int _searchRequestId = 0;
++  final historyQuerylist = [].obs;
++  late Box<dynamic> queryBox;
++  final urlPasted = false.obs;
++
++  // Desktop search bar related
++  final focusNode = FocusNode();
++  final isSearchBarInFocus = false.obs;
++
++  @override
++  onInit() {
++    _init();
++    super.onInit();
++  }
++
++  _init() async {
++    if(GetPlatform.isDesktop){
++      focusNode.addListener((){
++        isSearchBarInFocus.value = focusNode.hasFocus;
++      });
++    }
++    queryBox = await Hive.openBox("searchQuery");
++    historyQuerylist.value = queryBox.values.toList().reversed.toList();
++  }
++
++  Future<void> onChanged(String text) async {
++    final requestId = ++_searchRequestId;
++    final query = text.trim();
++    if (query.contains("https://")) {
++      urlPasted.value = true;
++      suggestionList.clear();
++      searchPreviewResults.clear();
++      return;
++    }
++    urlPasted.value = false;
++    if (query.isEmpty) {
++      suggestionList.clear();
++      searchPreviewResults.clear();
++      return;
++    }
++
++    try {
++      final results = await Future.wait<dynamic>([
++        musicServices.getSearchSuggestion(query),
++        query.length >= 2
++            ? musicServices.search(query, limit: 6)
++            : Future.value(<String, dynamic>{}),
++      ]);
++      if (requestId != _searchRequestId) return;
++      suggestionList.value = List<String>.from(results[0] as List);
++      searchPreviewResults.assignAll(
++          Map<String, dynamic>.from(results[1] as Map));
++    } catch (_) {
++      if (requestId != _searchRequestId) return;
++      suggestionList.clear();
++      searchPreviewResults.clear();
++    }
++  }
++
++  Future<void> suggestionInput(String txt) async {
++    textInputController.text = txt;
++    textInputController.selection =
++        TextSelection.collapsed(offset: textInputController.text.length);
++    await onChanged(txt);
++  }
++
++  Future<void> addToHistryQueryList(String txt) async {
++    if (historyQuerylist.length > 9) {
++      final queryForRemoval = queryBox.getAt(0);
++      await queryBox.deleteAt(0);
++      historyQuerylist.removeWhere((element) => element == queryForRemoval);
++    }
++    if (!historyQuerylist.contains(txt)) {
++      await queryBox.add(txt);
++      historyQuerylist.insert(0, txt);
++    }
++
++    //reset current query and suggestionlist
++    reset();
++  }
++
++  void reset() {
++    _searchRequestId++;
++    urlPasted.value = false;
++    textInputController.text = "";
++    suggestionList.clear();
++    searchPreviewResults.clear();
++  }
++
++  Future<void> removeQueryFromHistory(String txt) async {
++    final index = queryBox.values.toList().indexOf(txt);
++    await queryBox.deleteAt(index);
++    historyQuerylist.remove(txt);
++  }
++
++  @override
++  void dispose() {
++    focusNode.dispose();
++    textInputController.dispose();
++    queryBox.close();
++    super.dispose();
++  }
++}
+
+diff --git a/lib/ui/screens/Search/components/search_preview.dart b/lib/ui/screens/Search/components/search_preview.dart
+--- a/lib/ui/screens/Search/components/search_preview.dart
++++ b/lib/ui/screens/Search/components/search_preview.dart
+@@ -1,0 +1,72 @@
+
++import 'package:audio_service/audio_service.dart';
++import 'package:flutter/material.dart';
++import 'package:get/get.dart';
++
++import '/models/album.dart';
++import '/models/playlist.dart';
++import '/ui/player/player_controller.dart';
++import '/ui/widgets/content_list_widget_item.dart';
++import '/ui/widgets/song_list_tile.dart';
++
++class SearchPreview extends StatelessWidget {
++  const SearchPreview({super.key, required this.results});
++
++  final Map<String, dynamic> results;
++
++  @override
++  Widget build(BuildContext context) {
++    final songs = List<MediaItem>.from(results['Songs'] ?? const []);
++    final albums = List<Album>.from(results['Albums'] ?? const []);
++    final playlists = <Playlist>[
++      ...List<Playlist>.from(results['Featured playlists'] ?? const []),
++      ...List<Playlist>.from(results['Community playlists'] ?? const []),
++      ...List<Playlist>.from(results['Playlists'] ?? const []),
++    ];
++
++    return Column(
++      crossAxisAlignment: CrossAxisAlignment.start,
++      children: [
++        if (songs.isNotEmpty) ...[
++          _sectionTitle(context, 'Songs'),
++          ...songs.take(5).map((song) => SongListTile(
++                song: song,
++                onTap: () => Get.find<PlayerController>().pushSongToQueue(song),
++              )),
++        ],
++        if (playlists.isNotEmpty) ...[
++          _sectionTitle(context, 'Playlists'),
++          SizedBox(
++            height: 190,
++            child: ListView.separated(
++              scrollDirection: Axis.horizontal,
++              itemCount: playlists.length > 6 ? 6 : playlists.length,
++              separatorBuilder: (_, __) => const SizedBox(width: 8),
++              itemBuilder: (_, index) =>
++                  ContentListItem(content: playlists[index]),
++            ),
++          ),
++        ],
++        if (albums.isNotEmpty) ...[
++          _sectionTitle(context, 'Albums'),
++          SizedBox(
++            height: 190,
++            child: ListView.separated(
++              scrollDirection: Axis.horizontal,
++              itemCount: albums.length > 6 ? 6 : albums.length,
++              separatorBuilder: (_, __) => const SizedBox(width: 8),
++              itemBuilder: (_, index) => ContentListItem(content: albums[index]),
++            ),
++          ),
++        ],
++      ],
++    );
++  }
++
++  Widget _sectionTitle(BuildContext context, String title) => Padding(
++        padding: const EdgeInsets.fromLTRB(16, 14, 12, 4),
++        child: Text(title,
++            style: Theme.of(context).textTheme.titleMedium?.copyWith(
++                  fontWeight: FontWeight.w700,
++                )),
++      );
 +}
