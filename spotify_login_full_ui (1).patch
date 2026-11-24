@@ -5168,7 +5168,7 @@ index 6cfbdfa..12dd76d 100644
 diff --git a/lib/ui/screens/Search/components/search_item.dart b/lib/ui/screens/Search/components/search_item.dart
 --- a/lib/ui/screens/Search/components/search_item.dart
 +++ b/lib/ui/screens/Search/components/search_item.dart
-@@ -1,71 +1,81 @@
+@@ -1,71 +1,91 @@
 -import 'package:flutter/material.dart';
 -import 'package:get/get.dart';
 -import '/ui/screens/Search/search_screen_controller.dart';
@@ -5300,9 +5300,19 @@ diff --git a/lib/ui/screens/Search/components/search_item.dart b/lib/ui/screens/
 +        ),
 +      ),
 +      trailing: SizedBox(
-+        width: 40,
++        width: isHistoryString ? 80 : 40,
 +        child: Row(
 +          children: [
++            if (isHistoryString)
++              IconButton(
++                iconSize: 18,
++                splashRadius: 18,
++                visualDensity: const VisualDensity(horizontal: -2),
++                onPressed: () {
++                  searchScreenController.removeQueryFromHistory(queryString);
++                },
++                icon: Icon(Icons.clear, color: muted),
++              ),
 +            IconButton(
 +              iconSize: 20,
 +              splashRadius: 18,
@@ -5321,11 +5331,10 @@ diff --git a/lib/ui/screens/Search/components/search_item.dart b/lib/ui/screens/
 +    );
 +  }
 +}
-
 diff --git a/lib/ui/widgets/song_list_tile.dart b/lib/ui/widgets/song_list_tile.dart
 --- a/lib/ui/widgets/song_list_tile.dart
 +++ b/lib/ui/widgets/song_list_tile.dart
-@@ -1,213 +1,220 @@
+@@ -1,213 +1,213 @@
 -import 'package:audio_service/audio_service.dart' show MediaItem;
 -import 'package:flutter/gestures.dart';
 -import 'package:flutter/material.dart';
@@ -5539,7 +5548,7 @@ diff --git a/lib/ui/widgets/song_list_tile.dart b/lib/ui/widgets/song_list_tile.
 -        ));
 -  }
 -}
-+import 'package:audio_service/audio_service.dart' show MediaItem, PlayButtonState;
++import 'package:audio_service/audio_service.dart' show MediaItem;
 +import 'package:flutter/gestures.dart';
 +import 'package:flutter/material.dart';
 +import 'package:flutter_slidable/flutter_slidable.dart';
@@ -5688,20 +5697,13 @@ diff --git a/lib/ui/widgets/song_list_tile.dart b/lib/ui/widgets/song_list_tile.
 +              delay: const Duration(milliseconds: 300),
 +              duration: const Duration(seconds: 5),
 +              id: song.title.hashCode.toString(),
-+              child: Obx(() {
-+                final isPlaying =
-+                    playerController.currentSong.value?.id == song.id &&
-+                    playerController.buttonState.value == PlayButtonState.playing;
-+                return Text(
-+                  song.title.length > 50
-+                      ? song.title.substring(0, 50)
-+                      : song.title,
-+                  maxLines: 1,
-+                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
-+                        color: isPlaying ? const Color(0xFF1ED760) : null,
-+                      ),
-+                );
-+              }),
++              child: Text(
++                song.title.length > 50
++                    ? song.title.substring(0, 50)
++                    : song.title,
++                maxLines: 1,
++                style: Theme.of(context).textTheme.titleMedium,
++              ),
 +            ),
 +            subtitle: Text(
 +              "${song.artist}",
@@ -5759,7 +5761,6 @@ diff --git a/lib/ui/widgets/song_list_tile.dart b/lib/ui/widgets/song_list_tile.
 +        ));
 +  }
 +}
-
 diff --git a/lib/ui/screens/Search/search_result_screen_v2.dart b/lib/ui/screens/Search/search_result_screen_v2.dart
 --- a/lib/ui/screens/Search/search_result_screen_v2.dart
 +++ b/lib/ui/screens/Search/search_result_screen_v2.dart
