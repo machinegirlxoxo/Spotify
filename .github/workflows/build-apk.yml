@@ -15,8 +15,12 @@ jobs:
         with:
           flutter-version: '3.38.x'
           channel: stable
-      - name: Apply patch
-        run: git apply --whitespace=nowarn "spotify_login_full_ui (1).patch"
+      - name: Apply patches
+        run: |
+          git apply --check --whitespace=nowarn "spotify_login_full_ui (1).patch"
+          git apply --whitespace=nowarn "spotify_login_full_ui (1).patch"
+          git apply --check --whitespace=nowarn "spotify-style-ui.patch"
+          git apply --whitespace=nowarn "spotify-style-ui.patch"
       - run: flutter pub get
       - run: flutter build apk --release --split-per-abi
       - uses: actions/upload-artifact@v4
