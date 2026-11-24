@@ -1,0 +1,514 @@
+diff --git a/lib/services/spotify_service.dart b/lib/services/spotify_service.dart
+index 672504c..38a5de4 100644
+--- a/lib/services/spotify_service.dart
++++ b/lib/services/spotify_service.dart
+@@ -5,6 +5,7 @@ import 'dart:math';
+ import 'package:audio_service/audio_service.dart';
+ import 'package:crypto/crypto.dart';
+ import 'package:dio/dio.dart';
++import 'package:flutter_inappwebview/flutter_inappwebview.dart' show CookieManager;
+ import 'package:get/get.dart';
+ import 'package:hive/hive.dart';
+ 
+@@ -16,6 +17,42 @@ import '../ui/screens/Library/library_controller.dart';
+ import '../utils/helper.dart';
+ import 'music_service.dart';
+ 
++/// Minimal counting semaphore used to cap concurrent network work.
++class _Pool {
++  _Pool(this._free);
++  int _free;
++  final _waiting = <Completer<void>>[];
++
++  Future<T> run<T>(Future<T> Function() task) async {
++    if (_free > 0) {
++      _free--;
++    } else {
++      final c = Completer<void>();
++      _waiting.add(c);
++      await c.future;
++    }
++    try {
++      return await task();
++    } finally {
++      if (_waiting.isNotEmpty) {
++        _waiting.removeAt(0).complete();
++      } else {
++        _free++;
++      }
++    }
++  }
++}
++
++/// Serialises async sections (used for Hive box open/write/close).
++class _Lock {
++  Future<void> _last = Future.value();
++  Future<T> synchronized<T>(Future<T> Function() task) {
++    final next = _last.then((_) => task());
++    _last = next.then((_) {}, onError: (_) {});
++    return next;
++  }
++}
++
+ class SpotifyException implements Exception {
+   SpotifyException(this.code, this.message);
+   final int code;
+@@ -63,6 +100,12 @@ class SpotifyService extends GetxService {
+ 
+   String? _accessToken;
+   int _tokenExpiry = 0;
++  Future<String>? _tokenInFlight;
++
++  // Shared limits so parallel playlists don't flood Spotify / YouTube Music.
++  final _matchPool = _Pool(12);
++  final _gqlPool = _Pool(6);
++  final _dbLock = _Lock();
+ 
+   Box get _box => Hive.box('AppPrefs');
+   Map get _data => (_box.get('spotify') ?? {}) as Map;
+@@ -87,10 +130,17 @@ class SpotifyService extends GetxService {
+ 
+   void skip() => _save({'skipped': true});
+ 
+-  void logout() {
+-    _save({'spDc': '', 'skipped': false});
++  /// Logs out of Spotify. With [stayLoggedOut] the login prompt is not shown
++  /// again on the next launch (used by the manual Log out button); an expired
++  /// session leaves it false so the user is asked to log in again.
++  Future<void> logout({bool stayLoggedOut = false}) async {
++    _save({'spDc': '', 'skipped': stayLoggedOut});
+     _accessToken = null;
++    _tokenExpiry = 0;
+     isLoggedIn.value = false;
++    try {
++      await CookieManager.instance().deleteAllCookies();
++    } catch (_) {}
+   }
+ 
+   // ---------------------------------------------------------------- token --
+@@ -100,6 +150,19 @@ class SpotifyService extends GetxService {
+         DateTime.now().millisecondsSinceEpoch < _tokenExpiry) {
+       return _accessToken!;
+     }
++    // Many requests now run in parallel: share one refresh between them.
++    final inFlight = _tokenInFlight;
++    if (inFlight != null) return inFlight;
++    final f = _fetchToken();
++    _tokenInFlight = f;
++    try {
++      return await f;
++    } finally {
++      _tokenInFlight = null;
++    }
++  }
++
++  Future<String> _fetchToken() async {
+     // 1. TOTP secret (rotated by Spotify, kept up to date by the community)
+     final gist = await _dio.get(_nuanceUrl);
+     if (gist.statusCode != 200) {
+@@ -131,7 +194,7 @@ class SpotifyService extends GetxService {
+     }
+     final d = res.data is String ? jsonDecode(res.data) : res.data;
+     if (d['isAnonymous'] == true || (d['accessToken'] ?? '').toString().isEmpty) {
+-      logout();
++      await logout();
+       throw SpotifyException(401, 'Session expired, please log in again');
+     }
+     _accessToken = d['accessToken'];
+@@ -180,7 +243,10 @@ class SpotifyService extends GetxService {
+     } catch (_) {}
+   }
+ 
+-  Future<Map> _gql(String op, Map<String, dynamic> variables) async {
++  Future<Map> _gql(String op, Map<String, dynamic> variables) =>
++      _gqlPool.run(() => _gqlRaw(op, variables));
++
++  Future<Map> _gqlRaw(String op, Map<String, dynamic> variables) async {
+     for (var attempt = 0; attempt < 4; attempt++) {
+       final res = await _dio.post(_gqlUrl,
+           data: jsonEncode({
+@@ -277,48 +343,55 @@ class SpotifyService extends GetxService {
+     };
+   }
+ 
+-  Future<List<Map>> _likedTracks() async {
+-    final out = <Map>[];
+-    var offset = 0;
+-    while (true) {
+-      final r = await _gql('fetchLibraryTracks', {'offset': offset, 'limit': 50});
+-      final tracks = r['data']?['me']?['library']?['tracks'];
+-      if (tracks == null) break;
+-      final items = (tracks['items'] as List? ?? []);
+-      for (final e in items) {
+-        final w = e['track'];
+-        final t = _trackFrom(w?['data'], uri: w?['_uri'] ?? w?['uri']);
+-        if (t != null) out.add(t);
+-      }
+-      offset += 50;
+-      if (items.isEmpty || offset >= ((tracks['totalCount'] ?? 0) as int)) break;
+-    }
+-    return out;
++  /// Fetches page 0 first (to learn the total), then every remaining page in
++  /// parallel, and returns the pages in order.
++  Future<List<T>> _pages<T>(
++      {required int pageSize,
++      required Future<(List<T>, int)> Function(int offset) fetch}) async {
++    final first = await fetch(0);
++    final total = first.$2;
++    final offsets = [for (var o = pageSize; o < total; o += pageSize) o];
++    final rest = await Future.wait(offsets.map((o) => fetch(o)));
++    return [...first.$1, for (final r in rest) ...r.$1];
+   }
+ 
+-  Future<List<Map>> _playlistTracks(String id) async {
+-    final out = <Map>[];
+-    var offset = 0;
+-    while (true) {
+-      final r = await _gql('fetchPlaylist', {
+-        'uri': 'spotify:playlist:$id',
+-        'offset': offset,
+-        'limit': 100,
+-        'enableWatchFeedEntrypoint': false,
+-      });
+-      final content = r['data']?['playlistV2']?['content'];
+-      if (content == null) break;
+-      final items = (content['items'] as List? ?? []);
+-      for (final e in items) {
+-        final w = e['itemV2'];
+-        final t = _trackFrom(w?['data'], uri: w?['_uri'] ?? w?['uri']);
+-        if (t != null) out.add(t);
+-      }
+-      offset += 100;
+-      if (items.isEmpty || offset >= ((content['totalCount'] ?? 0) as int)) break;
+-    }
+-    return out;
+-  }
++  Future<List<Map>> _likedTracks() => _pages<Map>(
++        pageSize: 50,
++        fetch: (offset) async {
++          final r =
++              await _gql('fetchLibraryTracks', {'offset': offset, 'limit': 50});
++          final tracks = r['data']?['me']?['library']?['tracks'];
++          if (tracks == null) return (<Map>[], 0);
++          final out = <Map>[];
++          for (final e in (tracks['items'] as List? ?? [])) {
++            final w = e['track'];
++            final t = _trackFrom(w?['data'], uri: w?['_uri'] ?? w?['uri']);
++            if (t != null) out.add(t);
++          }
++          return (out, (tracks['totalCount'] ?? 0) as int);
++        },
++      );
++
++  Future<List<Map>> _playlistTracks(String id) => _pages<Map>(
++        pageSize: 100,
++        fetch: (offset) async {
++          final r = await _gql('fetchPlaylist', {
++            'uri': 'spotify:playlist:$id',
++            'offset': offset,
++            'limit': 100,
++            'enableWatchFeedEntrypoint': false,
++          });
++          final content = r['data']?['playlistV2']?['content'];
++          if (content == null) return (<Map>[], 0);
++          final out = <Map>[];
++          for (final e in (content['items'] as List? ?? [])) {
++            final w = e['itemV2'];
++            final t = _trackFrom(w?['data'], uri: w?['_uri'] ?? w?['uri']);
++            if (t != null) out.add(t);
++          }
++          return (out, (content['totalCount'] ?? 0) as int);
++        },
++      );
+ 
+   // --------------------------------------------------------------- import --
+   Future<String?> importLibrary() async {
+@@ -328,21 +401,24 @@ class SpotifyService extends GetxService {
+     try {
+       status.value = 'Reading your Spotify library…';
+       await _refreshHashes();
+-      final playlists = (await _library('Playlists'))
++      final libs = await Future.wait([
++        _library('Playlists'),
++        _library('Artists'),
++        _library('Albums').catchError((e) {
++          printERROR('Spotify albums fetch failed: $e');
++          return <Map>[];
++        }),
++      ]);
++      final playlists = libs[0]
+           .where((w) =>
+               '${w['__typename']}'.contains('Playlist') && w['data'] is Map)
+           .toList();
+-      final artists = (await _library('Artists'))
++      final artists = libs[1]
+           .where((w) => '${w['__typename']}'.contains('Artist') && w['data'] is Map)
+           .toList();
+-      List<Map> albums = [];
+-      try {
+-        albums = (await _library('Albums'))
+-            .where((w) => '${w['__typename']}'.contains('Album') && w['data'] is Map)
+-            .toList();
+-      } catch (e) {
+-        printERROR('Spotify albums fetch failed: $e');
+-      }
++      final albums = libs[2]
++          .where((w) => '${w['__typename']}'.contains('Album') && w['data'] is Map)
++          .toList();
+ 
+       final jobs = <Future<void> Function()>[];
+       final totalSteps = playlists.length + 1 + albums.length + artists.length;
+@@ -398,7 +474,7 @@ class SpotifyService extends GetxService {
+       }
+ 
+       final queue = List.of(jobs);
+-      await Future.wait(List.generate(4, (_) async {
++      await Future.wait(List.generate(8, (_) async {
+         while (queue.isNotEmpty) {
+           final job = queue.removeAt(0);
+           try {
+@@ -424,44 +500,53 @@ class SpotifyService extends GetxService {
+ 
+   Future<void> _importTrackList(
+       String playlistId, String title, List<Map> tracks, String? cover) async {
+-    final matched = <MediaItem>[];
+     final matchBox = await Hive.openBox('SpotifyMatches');
+-    for (final t in tracks) {
+-      if (t['id'] == '' || t['local'] == true) continue;
++    final wanted = tracks
++        .where((t) => t['id'] != '' && t['local'] != true)
++        .toList(growable: false);
++
++    // Match all tracks in parallel (bounded by the shared pool). Cached
++    // matches return instantly; order of the Spotify playlist is preserved.
++    final results = await Future.wait(wanted.map((t) async {
+       final cached = matchBox.get(t['id']);
+-      if (cached != null) {
+-        matched.add(MediaItemBuilder.fromJson(cached));
+-        continue;
+-      }
+-      final item = await _matchTrack(t);
++      if (cached != null) return MediaItemBuilder.fromJson(cached);
++      final item = await _matchPool.run(() => _matchTrack(t));
+       if (item != null) {
+         matchBox.put(t['id'], MediaItemBuilder.toJson(item));
+-        matched.add(item);
+       }
+-    }
++      return item;
++    }));
++    final matched = results.whereType<MediaItem>().toList();
+     if (matched.isEmpty && tracks.isNotEmpty) return;
+ 
+-    final listBox = await Hive.openBox(playlistId);
+-    await listBox.clear();
+-    for (final m in matched) {
+-      await listBox.add(MediaItemBuilder.toJson(m));
+-    }
+-    await listBox.close();
+-
+-    final plBox = await Hive.openBox('LibraryPlaylists');
+-    await plBox.put(
+-        playlistId,
+-        Playlist(
+-                title: title,
+-                playlistId: playlistId,
+-                description: 'Spotify',
+-                thumbnailUrl: cover ??
+-                    (matched.isNotEmpty
+-                        ? matched.first.artUri.toString()
+-                        : Playlist.thumbPlaceholderUrl),
+-                isCloudPlaylist: false)
+-            .toJson());
+-    await plBox.close();
++    // Hive boxes are opened/closed by name, so keep the writes one at a time.
++    await _dbLock.synchronized(() async {
++      final listBox = await Hive.openBox(playlistId);
++      await listBox.clear();
++      await listBox.addAll(matched.map(MediaItemBuilder.toJson));
++      await listBox.close();
++
++      // Keep the real Spotify cover. It is only replaced by a song's art when
++      // Spotify has no cover for this playlist (and then it is stored once).
++      final plBox = await Hive.openBox('LibraryPlaylists');
++      final existing = plBox.get(playlistId);
++      final keptCover = cover ??
++          (existing is Map ? existing['thumbnails']?[0]?['url'] as String? : null);
++      await plBox.put(
++          playlistId,
++          Playlist(
++                  title: title,
++                  playlistId: playlistId,
++                  description: 'Spotify',
++                  thumbnailUrl: (keptCover != null && keptCover.isNotEmpty)
++                      ? keptCover
++                      : (matched.isNotEmpty
++                          ? matched.first.artUri.toString()
++                          : Playlist.thumbPlaceholderUrl),
++                  isCloudPlaylist: false)
++              .toJson());
++      await plBox.close();
++    });
+   }
+ 
+   Future<MediaItem?> _matchTrack(Map t) async {
+@@ -486,26 +571,30 @@ class SpotifyService extends GetxService {
+   }
+ 
+   Future<void> _importAlbum(String name, String artist) async {
+-    final res = await Get.find<MusicServices>()
+-        .search('$name $artist', filter: 'albums', limit: 3);
++    final res = await _matchPool.run(() => Get.find<MusicServices>()
++        .search('$name $artist', filter: 'albums', limit: 3));
+     final album = _firstList(res).whereType<Album>().firstOrNull;
+     if (album == null) return;
+-    final box = await Hive.openBox('LibraryAlbums');
+-    await box.put(album.browseId, album.toJson());
+-    await box.close();
++    await _dbLock.synchronized(() async {
++      final box = await Hive.openBox('LibraryAlbums');
++      await box.put(album.browseId, album.toJson());
++      await box.close();
++    });
+   }
+ 
+   Future<void> _importArtist(String name) async {
+-    final res = await Get.find<MusicServices>()
+-        .search(name, filter: 'artists', limit: 3);
++    final res = await _matchPool.run(() =>
++        Get.find<MusicServices>().search(name, filter: 'artists', limit: 3));
+     final list = _firstList(res).whereType<Artist>().toList();
+     if (list.isEmpty) return;
+     final exact = list.firstWhere(
+         (a) => a.name.toLowerCase() == name.toLowerCase(),
+         orElse: () => list.first);
+-    final box = await Hive.openBox('LibraryArtists');
+-    await box.put(exact.browseId, exact.toJson());
+-    await box.close();
++    await _dbLock.synchronized(() async {
++      final box = await Hive.openBox('LibraryArtists');
++      await box.put(exact.browseId, exact.toJson());
++      await box.close();
++    });
+   }
+ 
+   List _firstList(Map<String, dynamic> res) {
+diff --git a/lib/ui/screens/Playlist/playlist_screen_controller.dart b/lib/ui/screens/Playlist/playlist_screen_controller.dart
+index 46b9498..bf116b9 100644
+--- a/lib/ui/screens/Playlist/playlist_screen_controller.dart
++++ b/lib/ui/screens/Playlist/playlist_screen_controller.dart
+@@ -268,6 +268,12 @@ class PlaylistScreenController extends PlaylistAlbumScreenControllerBase
+       return;
+     }
+ 
++    // Imported Spotify playlists keep their own cover instead of following
++    // the first song's art.
++    if (currentPlaylist.playlistId.startsWith('LIBSP_')) {
++      return;
++    }
++
+     Playlist updatedplaylist;
+     if (songList.isNotEmpty) {
+       updatedplaylist =
+diff --git a/lib/ui/screens/Settings/settings_screen.dart b/lib/ui/screens/Settings/settings_screen.dart
+index b593408..3daf875 100644
+--- a/lib/ui/screens/Settings/settings_screen.dart
++++ b/lib/ui/screens/Settings/settings_screen.dart
+@@ -256,31 +256,72 @@ class SettingsScreen extends StatelessWidget {
+                           style: Theme.of(context).textTheme.bodyMedium),
+                       trailing: Obx(() {
+                         final sp = Get.find<SpotifyService>();
+-                        return TextButton(
+-                            child: Text(
+-                                sp.isLoggedIn.value ? "Re-sync" : "Log in",
+-                                style: Theme.of(context)
+-                                    .textTheme
+-                                    .titleMedium!
+-                                    .copyWith(fontSize: 15)),
+-                            onPressed: () async {
+-                              if (sp.isLoggedIn.value) {
+-                                ScaffoldMessenger.of(context).showSnackBar(
+-                                    snackbar(context, "Syncing Spotify in background…",
+-                                        size: SanckBarSize.BIG));
+-                                final err = await sp.importLibrary();
+-                                if (context.mounted) {
+-                                  ScaffoldMessenger.of(context).showSnackBar(
+-                                      snackbar(context, err ?? "Spotify sync done",
+-                                          size: SanckBarSize.BIG));
+-                                }
+-                              } else {
+-                                showDialog(
+-                                    context: context,
+-                                    barrierDismissible: false,
+-                                    builder: (_) => const SpotifyLoginDialog());
+-                              }
+-                            });
++                        final btnStyle = Theme.of(context)
++                            .textTheme
++                            .titleMedium!
++                            .copyWith(fontSize: 15);
++                        return Row(
++                          mainAxisSize: MainAxisSize.min,
++                          children: [
++                            if (sp.isLoggedIn.value)
++                              TextButton(
++                                  child: Text("Log out", style: btnStyle),
++                                  onPressed: () async {
++                                    final ok = await showDialog<bool>(
++                                      context: context,
++                                      builder: (ctx) => AlertDialog(
++                                        title: const Text("Log out of Spotify?"),
++                                        content: const Text(
++                                            "Your imported playlists stay in the "
++                                            "library. You can log in again any time."),
++                                        actions: [
++                                          TextButton(
++                                              onPressed: () =>
++                                                  Navigator.of(ctx).pop(false),
++                                              child: const Text("Cancel")),
++                                          TextButton(
++                                              onPressed: () =>
++                                                  Navigator.of(ctx).pop(true),
++                                              child: const Text("Log out")),
++                                        ],
++                                      ),
++                                    );
++                                    if (ok != true) return;
++                                    await sp.logout(stayLoggedOut: true);
++                                    if (context.mounted) {
++                                      ScaffoldMessenger.of(context)
++                                          .showSnackBar(snackbar(context,
++                                              "Logged out of Spotify",
++                                              size: SanckBarSize.BIG));
++                                    }
++                                  }),
++                            TextButton(
++                                child: Text(
++                                    sp.isLoggedIn.value ? "Re-sync" : "Log in",
++                                    style: btnStyle),
++                                onPressed: () async {
++                                  if (sp.isLoggedIn.value) {
++                                    ScaffoldMessenger.of(context).showSnackBar(
++                                        snackbar(context,
++                                            "Syncing Spotify in background…",
++                                            size: SanckBarSize.BIG));
++                                    final err = await sp.importLibrary();
++                                    if (context.mounted) {
++                                      ScaffoldMessenger.of(context).showSnackBar(
++                                          snackbar(context,
++                                              err ?? "Spotify sync done",
++                                              size: SanckBarSize.BIG));
++                                    }
++                                  } else {
++                                    showDialog(
++                                        context: context,
++                                        barrierDismissible: false,
++                                        builder: (_) =>
++                                            const SpotifyLoginDialog());
++                                  }
++                                }),
++                          ],
++                        );
+                       }),
+                     ),
+                     ListTile(
