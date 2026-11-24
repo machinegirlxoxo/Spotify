@@ -770,7 +770,7 @@ index 0000000..b0cf891
 +      ? Get.find<AlbumColor>()
 +      : Get.put(AlbumColor(), permanent: true);
 +
-+  Future<void> update(MediaItem? song) async {
++  Future<void> updateSong(MediaItem? song) async {
 +    if (song == null) return;
 +    _currentId = song.id;
 +    final cached = _cache[song.id];
@@ -782,8 +782,8 @@ index 0000000..b0cf891
 +      final uri = song.artUri;
 +      if (uri == null) return;
 +      final ImageProvider<Object> provider = uri.isScheme('file')
-+          ? FileImage(File(uri.toFilePath()))
-+          : CachedNetworkImageProvider(uri.toString());
++          ? FileImage(File(uri.toFilePath())) as ImageProvider<Object>
++          : CachedNetworkImageProvider(uri.toString()) as ImageProvider<Object>;
 +      final generator = await PaletteGenerator.fromImageProvider(
 +          ResizeImage(provider, width: 120, height: 120),
 +          maximumColorCount: 12);
@@ -1912,9 +1912,9 @@ index 35290b2..623636e 100644
 +    super.initState();
 +    final pc = Get.find<PlayerController>();
 +    // Re-colour the gradient from the album cover whenever the song changes.
-+    AlbumColor.instance.update(pc.currentSong.value);
++    AlbumColor.instance.updateSong(pc.currentSong.value);
 +    _songWorker =
-+        ever(pc.currentSong, (song) => AlbumColor.instance.update(song));
++        ever(pc.currentSong, (song) => AlbumColor.instance.updateSong(song));
 +  }
 +
 +  @override
