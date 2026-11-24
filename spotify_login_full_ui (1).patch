@@ -5094,7 +5094,7 @@ diff --git a/lib/ui/screens/Search/components/search_item.dart b/lib/ui/screens/
 +  Widget build(BuildContext context) {
 +    final searchScreenController = Get.find<SearchScreenController>();
 +    final prefix = queryString.toLowerCase().startsWith(searchPrefix.toLowerCase())
-+        ? queryString.substring(0, searchPrefix.length.clamp(0, queryString.length))
++        ? queryString.substring(0, searchPrefix.length > queryString.length ? queryString.length : searchPrefix.length)
 +        : '';
 +    final suffix = queryString.substring(prefix.length);
 +    final muted = Theme.of(context).textTheme.titleMedium!.color;
