@@ -689,6 +689,153 @@ index 9a387c2..13e2614 100644
      sortPlayLists(playlists, sortType, isAscending);
      playlists.insertAll(0, initPlst);
      libraryPlaylists.value = playlists;
+diff --git a/lib/ui/screens/Playlist/playlist_screen.dart b/lib/ui/screens/Playlist/playlist_screen.dart
+index ddb7353..4c27a75 100644
+--- a/lib/ui/screens/Playlist/playlist_screen.dart
++++ b/lib/ui/screens/Playlist/playlist_screen.dart
+@@ -18,6 +18,7 @@ import '../../widgets/snackbar.dart';
+ import '../../widgets/song_list_tile.dart';
+ import '../../widgets/songinfo_bottom_sheet.dart';
+ import '../../widgets/sort_widget.dart';
++import '../../widgets/cover_gradient_background.dart';
+ import '../Library/library_controller.dart';
+ import 'playlist_screen_controller.dart';
+ 
+@@ -53,60 +54,13 @@ class PlaylistScreen extends StatelessWidget {
+         },
+         child: Stack(
+           children: [
+-            Obx(
+-              () => playlistController.isContentFetched.isTrue
+-                  ? Positioned(
+-                      top: landscape
+-                          ? 0
+-                          : -.25 * playlistController.scrollOffset.value,
+-                      right: landscape ? 0 : null,
+-                      child: Obx(() {
+-                        final opacityValue = 1 -
+-                            playlistController.scrollOffset.value /
+-                                (size.width - 100);
+-                        return Opacity(
+-                          opacity: opacityValue < 0 ||
+-                                  playlistController.isSearchingOn.isTrue && !landscape
+-                              ? 0
+-                              : opacityValue,
+-                          child: DecoratedBox(
+-                            position: DecorationPosition.foreground,
+-                            decoration: BoxDecoration(
+-                              boxShadow: [
+-                                BoxShadow(
+-                                  color: Theme.of(context).canvasColor,
+-                                  spreadRadius: 200,
+-                                  blurRadius: 100,
+-                                  offset: Offset(-size.height, 0),
+-                                ),
+-                                BoxShadow(
+-                                  color: Theme.of(context).canvasColor,
+-                                  spreadRadius: 200,
+-                                  blurRadius: 100,
+-                                  offset: Offset(
+-                                      0,
+-                                      landscape
+-                                          ? size.height
+-                                          : size.width + 80),
+-                                )
+-                              ],
+-                            ),
+-                            child: CachedNetworkImage(
+-                              imageUrl: Thumbnail(playlistController
+-                                      .playlist.value.thumbnailUrl)
+-                                  .extraHigh,
+-                              fit: landscape ? BoxFit.fitHeight : BoxFit.cover,
+-                              width: landscape ? null : size.width,
+-                              height: landscape ? size.height : size.width,
+-                            ),
+-                          ),
+-                        );
+-                      }))
+-                  : SizedBox(
+-                      height: size.width,
+-                      width: size.width,
+-                    ),
+-            ),
++            Obx(() => Positioned(
++                  top: -playlistController.scrollOffset.value,
++                  left: 0,
++                  right: 0,
++                  child: CoverGradientBackground(
++                      imageUrl: playlistController.playlist.value.thumbnailUrl),
++                )),
+             Column(
+               children: [
+                 Container(
+@@ -238,11 +192,7 @@ class PlaylistScreen extends StatelessWidget {
+                           child: ListView.builder(
+                             addRepaintBoundaries: false,
+                             padding: EdgeInsets.only(
+-                              top: playlistController.isSearchingOn.isTrue
+-                                  ? 0
+-                                  : landscape
+-                                      ? 150
+-                                      : 200,
++                              top: 0,
+                               bottom: 200,
+                             ),
+                             itemCount: playlistController.songList.isEmpty ||
+@@ -251,7 +201,12 @@ class PlaylistScreen extends StatelessWidget {
+                                 : playlistController.songList.length + 3,
+                             itemBuilder: (_, index) {
+                               if (index == 0) {
+-                                return Padding(
++                                return Column(children: [
++                                  if (playlistController.isSearchingOn.isFalse)
++                                    CoverArtHeader(
++                                        imageUrl: playlistController
++                                            .playlist.value.thumbnailUrl),
++                                  Padding(
+                                   padding: const EdgeInsets.only(left: 15.0),
+                                   child: SizedBox(
+                                     height: 40,
+@@ -310,7 +265,8 @@ class PlaylistScreen extends StatelessWidget {
+                                           IconButton(
+                                             tooltip: "play".tr,
+                                               onPressed: () {
+-                                                playerController.playPlayListSong(
++                                                playlistController.markPlayed();
++                                playerController.playPlayListSong(
+                                                     List<MediaItem>.from(
+                                                         playlistController
+                                                             .songList),
+@@ -366,7 +322,8 @@ class PlaylistScreen extends StatelessWidget {
+                                                             .songList);
+                                                 songsToplay.shuffle();
+                                                 songsToplay.shuffle();
+-                                                playerController.playPlayListSong(
++                                                playlistController.markPlayed();
++                                playerController.playPlayListSong(
+                                                     songsToplay, 0,
+                                                     playfrom: PlaylingFrom(
+                                                         name: playlistController
+@@ -546,7 +503,8 @@ class PlaylistScreen extends StatelessWidget {
+                                       ),
+                                     ),
+                                   ),
+-                                );
++                                  ),
++                                ]);
+                               } else if (index == 1) {
+                                 final title =
+                                     playlistController.playlist.value.title;
+@@ -693,7 +651,8 @@ class PlaylistScreen extends StatelessWidget {
+                                     const EdgeInsets.only(left: 20.0, right: 5),
+                                 child: SongListTile(
+                                   onTap: () {
+-                                    playerController.playPlayListSong(
++                                    playlistController.markPlayed();
++                                playerController.playPlayListSong(
+                                         List<MediaItem>.from(
+                                             playlistController.songList),
+                                         index - 3,
 diff --git a/lib/ui/screens/Playlist/playlist_screen_controller.dart b/lib/ui/screens/Playlist/playlist_screen_controller.dart
 index 46b9498..2c54d6b 100644
 --- a/lib/ui/screens/Playlist/playlist_screen_controller.dart
@@ -723,6 +870,645 @@ index 46b9498..2c54d6b 100644
          }
          isAddedToLibrary.value = add;
        }
+diff --git a/lib/ui/screens/Search/components/search_song_tile.dart b/lib/ui/screens/Search/components/search_song_tile.dart
+new file mode 100644
+index 0000000..7748419
+--- /dev/null
++++ b/lib/ui/screens/Search/components/search_song_tile.dart
+@@ -0,0 +1,134 @@
++import 'package:audio_service/audio_service.dart';
++import 'package:flutter/material.dart';
++import 'package:get/get.dart';
++import 'package:hive/hive.dart';
++
++import '/models/media_Item_builder.dart';
++import '/models/playling_from.dart';
++import '/ui/player/player_controller.dart';
++import '/ui/widgets/image_widget.dart';
++import '/ui/widgets/songinfo_bottom_sheet.dart';
++
++const _green = Color(0xFF1DB954);
++
++/// Spotify-style search song row: cover, title/artist, 3-dot menu,
++/// add (+) / added (green check) toggle. Tap plays the song.
++class SearchSongTile extends StatefulWidget {
++  const SearchSongTile(
++      {super.key,
++      required this.song,
++      required this.queue,
++      this.onPlayed,
++      this.onRemove});
++  final MediaItem song;
++
++  /// all songs of the result list, so playback continues with the next ones
++  final List<MediaItem> queue;
++
++  /// called when the row is tapped to play (used to store Recents)
++  final VoidCallback? onPlayed;
++
++  /// when set, an X button is shown (Recents list)
++  final VoidCallback? onRemove;
++
++  @override
++  State<SearchSongTile> createState() => _SearchSongTileState();
++}
++
++class _SearchSongTileState extends State<SearchSongTile> {
++  bool _isFav = false;
++
++  @override
++  void initState() {
++    super.initState();
++    _loadFav();
++  }
++
++  Future<void> _loadFav() async {
++    final box = await Hive.openBox("LIBFAV");
++    if (mounted) setState(() => _isFav = box.containsKey(widget.song.id));
++  }
++
++  Future<void> _toggleFav() async {
++    final box = await Hive.openBox("LIBFAV");
++    if (_isFav) {
++      await box.delete(widget.song.id);
++    } else {
++      await box.put(widget.song.id, MediaItemBuilder.toJson(widget.song));
++    }
++    if (mounted) setState(() => _isFav = !_isFav);
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    final player = Get.find<PlayerController>();
++    final song = widget.song;
++    final textTheme = Theme.of(context).textTheme;
++    return ListTile(
++      contentPadding: const EdgeInsets.only(left: 10, right: 4),
++      onTap: () {
++        widget.onPlayed?.call();
++        final index = widget.queue.indexWhere((e) => e.id == song.id);
++        player.playPlayListSong(List<MediaItem>.from(widget.queue),
++            index < 0 ? 0 : index,
++            playfrom: PlaylingFrom(
++                name: "search".tr, type: PlaylingFromType.SELECTION));
++      },
++      leading: ImageWidget(size: 55, song: song),
++      title: Obx(() {
++        final playing = player.currentSong.value?.id == song.id;
++        return Text(song.title,
++            maxLines: 1,
++            overflow: TextOverflow.ellipsis,
++            style: textTheme.titleMedium!.copyWith(
++                color: playing ? _green : null,
++                fontWeight: playing ? FontWeight.w700 : null));
++      }),
++      subtitle: Text("Song • ${song.artist ?? ""}",
++          maxLines: 1,
++          overflow: TextOverflow.ellipsis,
++          style: textTheme.titleSmall),
++      trailing: Row(mainAxisSize: MainAxisSize.min, children: [
++        if (widget.onRemove == null)
++        IconButton(
++          splashRadius: 20,
++          icon: const Icon(Icons.more_vert),
++          onPressed: () {
++            showModalBottomSheet(
++              constraints: const BoxConstraints(maxWidth: 500),
++              shape: const RoundedRectangleBorder(
++                  borderRadius:
++                      BorderRadius.vertical(top: Radius.circular(10.0))),
++              isScrollControlled: true,
++              context: player.homeScaffoldkey.currentState!.context,
++              barrierColor: Colors.transparent.withAlpha(100),
++              builder: (context) => SongInfoBottomSheet(song),
++            ).whenComplete(() {
++              Get.delete<SongInfoController>();
++              _loadFav();
++            });
++          },
++        ),
++        IconButton(
++          splashRadius: 20,
++          onPressed: _toggleFav,
++          icon: _isFav
++              ? Container(
++                  width: 26,
++                  height: 26,
++                  decoration: const BoxDecoration(
++                      color: _green, shape: BoxShape.circle),
++                  child: const Icon(Icons.check, size: 17, color: Colors.black),
++                )+              : const Icon(Icons.add_circle_outline, size: 28),
++        ),
++        if (widget.onRemove != null)
++          IconButton(
++            splashRadius: 20,
++            onPressed: widget.onRemove,
++            icon: const Icon(Icons.close, size: 26),
++          ),
++      ]),
++    );
++  }
++}
+diff --git a/lib/ui/screens/Search/search_screen.dart b/lib/ui/screens/Search/search_screen.dart
+index 5567e2f..77aba74 100644
+--- a/lib/ui/screens/Search/search_screen.dart
++++ b/lib/ui/screens/Search/search_screen.dart
+@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
+ import 'package:get/get.dart';
+ 
+ import 'components/search_item.dart';
++import 'components/search_song_tile.dart';
+ import '/ui/screens/Settings/settings_screen_controller.dart';
+ import '../../widgets/modified_text_field.dart';
+ import '/ui/navigator.dart';
+@@ -12,7 +13,7 @@ class SearchScreen extends StatelessWidget {
+ 
+   @override
+   Widget build(BuildContext context) {
+-    final searchScreenController = Get.put(SearchScreenController());
++    final c = Get.put(SearchScreenController());
+     final settingsScreenController = Get.find<SettingsScreenController>();
+     final topPadding = context.isLandscape ? 50.0 : 80.0;
+     return Scaffold(
+@@ -47,106 +48,240 @@ class SearchScreen extends StatelessWidget {
+                       ],
+                     ),
+                   )
+-                : const SizedBox(
+-                    width: 15,
+-                  ),
++                : const SizedBox(width: 0),
+             Expanded(
+-              child: Padding(
+-                padding: EdgeInsets.only(top: topPadding, left: 5),
+-                child: Column(
+-                  children: [
+-                    Align(
+-                      alignment: Alignment.centerLeft,
+-                      child: Text(
+-                        "search".tr,
+-                        style: Theme.of(context).textTheme.titleLarge,
+-                      ),
+-                    ),
+-                    const SizedBox(
+-                      height: 10,
+-                    ),
+-                    ModifiedTextField(
+-                      textCapitalization: TextCapitalization.sentences,
+-                      controller: searchScreenController.textInputController,
+-                      textInputAction: TextInputAction.search,
+-                      onChanged: searchScreenController.onChanged,
+-                      onSubmitted: (val) {
+-                        if (val.contains("https://")) {
+-                          searchScreenController.filterLinks(Uri.parse(val));
+-                          searchScreenController.reset();
+-                          return;
+-                        }
+-                        Get.toNamed(ScreenNavigationSetup.searchResultScreen,
+-                            id: ScreenNavigationSetup.id, arguments: val);
+-                        searchScreenController.addToHistryQueryList(val);
+-                      },
+-                      autofocus: settingsScreenController
+-                          .isBottomNavBarEnabled.isFalse,
+-                      cursorColor: Theme.of(context).textTheme.bodySmall!.color,
+-                      decoration: InputDecoration(
+-                          contentPadding: const EdgeInsets.only(left: 5),
+-                          focusColor: Colors.white,
+-                          hintText: "searchDes".tr,
+-                          suffix: IconButton(
+-                            onPressed: searchScreenController.reset,
+-                            icon: const Icon(Icons.close),
+-                            splashRadius: 16,
+-                            iconSize: 19,
+-                          )),
++              child: Obx(() => c.isSearchMode.isTrue
++                  ? _SearchPage(c: c, topPadding: topPadding)
++                  : _SearchLanding(c: c, topPadding: topPadding)),
++            ),
++          ],
++        ),
++      ),
++    );
++  }
++}
++
++/// Screen 1: "Search" title, white tappable bar and browse tiles.
++class _SearchLanding extends StatelessWidget {
++  const _SearchLanding({required this.c, required this.topPadding});
++  final SearchScreenController c;
++  final double topPadding;
++
++  static const _tiles = <(String, Color)>[
++    ("Pop", Color(0xFFDC148C)),
++    ("Hip-Hop", Color(0xFFBA5D07)),
++    ("Rock", Color(0xFFE91429)),
++    ("Chill", Color(0xFF477D95)),
++    ("Workout", Color(0xFF503750)),
++    ("Party", Color(0xFF8D67AB)),
++    ("K-pop", Color(0xFF1E3264)),
++    ("Arabic", Color(0xFF006450)),
++  ];
++
++  @override
++  Widget build(BuildContext context) {
++    return ListView(
++      padding: EdgeInsets.fromLTRB(16, topPadding - 20, 16, 300),
++      children: [
++        Text("search".tr,
++            style: Theme.of(context)
++                .textTheme
++                .titleLarge!
++                .copyWith(fontSize: 30, fontWeight: FontWeight.w800)),
++        const SizedBox(height: 18),
++        GestureDetector(
++          onTap: c.openSearch,
++          child: Container(
++            height: 50,
++            padding: const EdgeInsets.symmetric(horizontal: 14),
++            decoration: BoxDecoration(
++                color: Colors.white, borderRadius: BorderRadius.circular(6)),
++            child: Row(children: [
++              const Icon(Icons.search, color: Colors.black, size: 28),
++              const SizedBox(width: 12),
++              Expanded(
++                child: Text("searchDes".tr,
++                    maxLines: 1,
++                    overflow: TextOverflow.ellipsis,
++                    style: const TextStyle(
++                        color: Colors.black54,
++                        fontSize: 16,
++                        fontWeight: FontWeight.w600)),
++              ),
++            ]),
++          ),
++        ),
++        const SizedBox(height: 22),
++        Text("Browse all",
++            style: Theme.of(context)
++                .textTheme
++                .titleMedium!
++                .copyWith(fontWeight: FontWeight.w700, fontSize: 18)),
++        const SizedBox(height: 12),
++        GridView.count(
++          crossAxisCount: 2,
++          shrinkWrap: true,
++          physics: const NeverScrollableScrollPhysics(),
++          mainAxisSpacing: 12,
++          crossAxisSpacing: 12,
++          childAspectRatio: 1.8,
++          children: _tiles
++              .map((t) => GestureDetector(
++                    onTap: () {
++                      Get.toNamed(ScreenNavigationSetup.searchResultScreen,
++                          id: ScreenNavigationSetup.id, arguments: t.$1);
++                    },
++                    child: Container(
++                      padding: const EdgeInsets.all(12),
++                      decoration: BoxDecoration(
++                          color: t.$2, borderRadius: BorderRadius.circular(8)),
++                      child: Text(t.$1,
++                          style: const TextStyle(
++                              color: Colors.white,
++                              fontSize: 17,
++                              fontWeight: FontWeight.w800)),
+                     ),
+-                    Expanded(
+-                      child: Obx(() {
+-                        final isEmpty = searchScreenController
+-                                .suggestionList.isEmpty ||
+-                            searchScreenController.textInputController.text ==
+-                                "";
+-                        final list = isEmpty
+-                            ? searchScreenController.historyQuerylist.toList()
+-                            : searchScreenController.suggestionList.toList();
+-                        return ListView(
+-                            padding: const EdgeInsets.only(top: 5, bottom: 400),
+-                            physics: const BouncingScrollPhysics(
+-                                parent: AlwaysScrollableScrollPhysics()),
+-                            children: searchScreenController.urlPasted.isTrue
+-                                ? [
+-                                    InkWell(
+-                                      onTap: () {
+-                                        searchScreenController.filterLinks(
+-                                            Uri.parse(searchScreenController
+-                                                .textInputController.text));
+-                                        searchScreenController.reset();
+-                                      },
+-                                      child: Padding(
+-                                        padding: const EdgeInsets.symmetric(
+-                                            vertical: 10.0),
+-                                        child: SizedBox(
+-                                          width: double.maxFinite,
+-                                          height: 60,
+-                                          child: Center(
+-                                              child: Text(
+-                                            "urlSearchDes".tr,
+-                                            style: Theme.of(context)
+-                                                .textTheme
+-                                                .titleMedium,
+-                                          )),
+-                                        ),
+-                                      ),
+-                                    )
+-                                  ]
+-                                : list
+-                                    .map((item) => SearchItem(
+-                                        queryString: item,
+-                                        isHistoryString: isEmpty))
+-                                    .toList());
+-                      }),
+-                    )
+-                  ],
++                  ))
++              .toList(),
++        ),
++      ],
++    );
++  }
++}
++
++/// Screen 2: back arrow + input, Recents when empty, predictions + songs
++/// while typing.
++class _SearchPage extends StatelessWidget {
++  const _SearchPage({required this.c, required this.topPadding});
++  final SearchScreenController c;
++  final double topPadding;
++
++  @override
++  Widget build(BuildContext context) {
++    final theme = Theme.of(context);
++    return Column(
++      children: [
++        // top bar like Spotify: arrow + field + clear
++        Container(
++          color: Color.lerp(theme.canvasColor, Colors.white, 0.1),
++          padding: EdgeInsets.only(top: topPadding - 30, left: 4, right: 4),
++          height: topPadding + 50,
++          child: Row(children: [
++            IconButton(
++                icon: const Icon(Icons.arrow_back),
++                onPressed: c.closeSearch),
++            Expanded(
++              child: ModifiedTextField(
++                textCapitalization: TextCapitalization.sentences,
++                controller: c.textInputController,
++                textInputAction: TextInputAction.search,
++                onChanged: c.onChanged,
++                onSubmitted: (val) {
++                  if (val.contains("https://")) {
++                    c.filterLinks(Uri.parse(val));
++                    c.reset();
++                    return;
++                  }
++                  Get.toNamed(ScreenNavigationSetup.searchResultScreen,
++                      id: ScreenNavigationSetup.id, arguments: val);
++                  c.addToHistryQueryList(val);
++                },
++                autofocus: true,
++                cursorColor: theme.textTheme.bodySmall!.color,
++                decoration: InputDecoration(
++                  border: InputBorder.none,
++                  hintText: "searchDes".tr,
++                  suffixIcon: IconButton(
++                    onPressed: c.reset,
++                    icon: const Icon(Icons.close),
++                    splashRadius: 18,
++                  ),
+                 ),
+               ),
+             ),
+-          ],
++          ]),
+         ),
+-      ),
++        Expanded(
++          child: Obx(() {
++            final text = c.textInputController.text;
++            final typing = c.suggestionList.isNotEmpty && text != "";
++            return ListView(
++              padding: const EdgeInsets.only(top: 8, bottom: 400),
++              physics: const BouncingScrollPhysics(
++                  parent: AlwaysScrollableScrollPhysics()),
++              children: c.urlPasted.isTrue
++                  ? [
++                      InkWell(
++                        onTap: () {
++                          c.filterLinks(Uri.parse(c.textInputController.text));
++                          c.reset();
++                        },
++                        child: SizedBox(
++                          width: double.maxFinite,
++                          height: 80,
++                          child: Center(
++                              child: Text("urlSearchDes".tr,
++                                  style: theme.textTheme.titleMedium)),
++                        ),
++                      )
++                    ]
++                  : typing
++                      ? [
++                          ...c.suggestionList.toList().map((item) =>
++                              SearchItem(
++                                  queryString: item, isHistoryString: false)),
++                          if (text.trim().length > 1) ...[
++                            const SizedBox(height: 8),
++                            if (c.isSongsLoading.isTrue && c.songResults.isEmpty)
++                              const Padding(
++                                padding: EdgeInsets.all(20),
++                                child: Center(
++                                    child: SizedBox(
++                                        width: 22,
++                                        height: 22,
++                                        child: CircularProgressIndicator(
++                                            strokeWidth: 2))),
++                              ),
++                            ...c.songResults.map((song) => SearchSongTile(
++                                key: ValueKey(song.id),
++                                song: song,
++                                queue: c.songResults.toList(),
++                                onPlayed: () => c.addRecent(song))),
++                          ],
++                        ]
++                      : _recents(context),
++            );
++          }),
++        ),
++      ],
+     );
+   }
++
++  List<Widget> _recents(BuildContext context) {
++    if (c.recents.isEmpty) {
++      // nothing played yet: fall back to text query history
++      return c.historyQuerylist
++          .toList()
++          .map((item) => SearchItem(queryString: item, isHistoryString: true))
++          .toList();
++    }
++    final list = c.recents.toList();
++    return [
++      Padding(
++        padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
++        child: Text("Recents",
++            style: Theme.of(context)
++                .textTheme
++                .titleLarge!
++                .copyWith(fontSize: 24, fontWeight: FontWeight.w800)),
++      ),
++      ...list.map((song) => SearchSongTile(
++            key: ValueKey("recent_${song.id}"),
++            song: song,
++            queue: list,
++            onPlayed: () => c.addRecent(song),
++            onRemove: () => c.removeRecent(song.id),
++          )),
++    ];
++  }
+ }
+diff --git a/lib/ui/screens/Search/search_screen_controller.dart b/lib/ui/screens/Search/search_screen_controller.dart
+index 1d7bfd9..1db4b2b 100644
+--- a/lib/ui/screens/Search/search_screen_controller.dart
++++ b/lib/ui/screens/Search/search_screen_controller.dart
+@@ -1,7 +1,11 @@
++import 'dart:async';
++
++import 'package:audio_service/audio_service.dart';
+ import 'package:flutter/material.dart';
+ import 'package:get/get.dart';
+ import 'package:hive/hive.dart';
+ 
++import '/models/media_Item_builder.dart';
+ import '/utils/app_link_controller.dart' show ProcessLink;
+ import '/services/music_service.dart';
+ 
+@@ -13,6 +17,18 @@ class SearchScreenController extends GetxController with ProcessLink {
+   late Box<dynamic> queryBox;
+   final urlPasted = false.obs;
+ 
++  /// Songs matching the current text, shown under the suggestions
++  final songResults = <MediaItem>[].obs;
++  final isSongsLoading = false.obs;
++
++  /// false: landing page (white search bar), true: search page with Recents
++  final isSearchMode = false.obs;
++
++  /// Songs played from search, newest first
++  final recents = <MediaItem>[].obs;
++  Timer? _songDebounce;
++  String _lastSongQuery = '';
++
+   // Desktop search bar related
+   final focusNode = FocusNode();
+   final isSearchBarInFocus = false.obs;
+@@ -29,19 +45,89 @@ class SearchScreenController extends GetxController with ProcessLink {
+         isSearchBarInFocus.value = focusNode.hasFocus;
+       });
+     }
++    _loadRecents();
+     queryBox = await Hive.openBox("searchQuery");
+     historyQuerylist.value = queryBox.values.toList().reversed.toList();
+   }
+ 
++  void _loadRecents() {
++    final raw = Hive.box("AppPrefs").get("searchRecents");
++    if (raw is List) {
++      recents.value = raw
++          .map<MediaItem?>((e) {
++            try {
++              return MediaItemBuilder.fromJson(e);
++            } catch (_) {
++              return null;
++            }
++          })
++          .whereType<MediaItem>()
++          .toList();
++    }
++  }
++
++  void _saveRecents() {
++    Hive.box("AppPrefs").put("searchRecents",
++        recents.map((e) => MediaItemBuilder.toJson(e)).toList());
++  }
++
++  void addRecent(MediaItem song) {
++    recents.removeWhere((e) => e.id == song.id);
++    recents.insert(0, song);
++    if (recents.length > 30) recents.removeRange(30, recents.length);
++    _saveRecents();
++  }
++
++  void removeRecent(String id) {
++    recents.removeWhere((e) => e.id == id);
++    _saveRecents();
++  }
++
++  void openSearch() => isSearchMode.value = true;
++
++  void closeSearch() {
++    reset();
++    FocusManager.instance.primaryFocus?.unfocus();
++    isSearchMode.value = false;
++  }
++
+   Future<void> onChanged(String text) async {
+     if(text.contains("https://")){
+       urlPasted.value = true; 
+       return;
+     }
+     urlPasted.value = false;
++    _searchSongsDebounced(text);
+     suggestionList.value = await musicServices.getSearchSuggestion(text);
+   }
+ 
++  void _searchSongsDebounced(String text) {
++    _songDebounce?.cancel();
++    final query = text.trim();
++    if (query.length < 2) {
++      _lastSongQuery = '';
++      songResults.clear();
++      isSongsLoading.value = false;
++      return;
++    }
++    isSongsLoading.value = true;
++    _songDebounce = Timer(const Duration(milliseconds: 400), () async {
++      _lastSongQuery = query;
++      try {
++        final res =
++            await musicServices.search(query, filter: 'songs', limit: 20);
++        // ignore stale responses
++        if (_lastSongQuery != query) return;
++        songResults.value =
++            ((res['Songs'] as List?) ?? []).whereType<MediaItem>().toList();
++      } catch (_) {
++        if (_lastSongQuery == query) songResults.clear();
++      } finally {
++        if (_lastSongQuery == query) isSongsLoading.value = false;
++      }
++    });
++  }
++
+   Future<void> suggestionInput(String txt) async {
+     textInputController.text = txt;
+     textInputController.selection =
+@@ -68,6 +154,10 @@ class SearchScreenController extends GetxController with ProcessLink {
+     urlPasted.value = false;
+     textInputController.text = "";
+     suggestionList.clear();
++    _songDebounce?.cancel();
++    _lastSongQuery = '';
++    songResults.clear();
++    isSongsLoading.value = false;
+   }
+ 
+   Future<void> removeQueryFromHistory(String txt) async {
+@@ -78,6 +168,7 @@ class SearchScreenController extends GetxController with ProcessLink {
+ 
+   @override
+   void dispose() {
++    _songDebounce?.cancel();
+     focusNode.dispose();
+     textInputController.dispose();
+     queryBox.close();
 diff --git a/lib/ui/utils/cover_color.dart b/lib/ui/utils/cover_color.dart
 new file mode 100644
 index 0000000..29397ac
