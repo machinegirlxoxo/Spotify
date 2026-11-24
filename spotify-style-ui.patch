@@ -1,0 +1,1146 @@
+diff --git a/lib/ui/screens/Album/album_header.dart b/lib/ui/screens/Album/album_header.dart
+new file mode 100644
+index 0000000..3660221
+--- /dev/null
++++ b/lib/ui/screens/Album/album_header.dart
+@@ -0,0 +1,231 @@
++import 'package:audio_service/audio_service.dart';
++import 'package:cached_network_image/cached_network_image.dart';
++import 'package:flutter/material.dart';
++import 'package:get/get.dart';
++import 'package:share_plus/share_plus.dart';
++
++import '/models/playling_from.dart';
++import '/models/thumbnail.dart';
++import '../../../services/downloader.dart';
++import '../../player/player_controller.dart';
++import '../../widgets/cover_gradient_background.dart';
++import '../../widgets/snackbar.dart';
++import 'album_screen_controller.dart';
++
++const spotifyGreen = Color(0xFF1DB954);
++
++/// Spotify-like album header: cover, title, artist, meta line and action row.
++class AlbumHeader extends StatelessWidget {
++  const AlbumHeader({super.key, required this.controller});
++  final AlbumScreenController controller;
++
++  @override
++  Widget build(BuildContext context) {
++    final player = Get.find<PlayerController>();
++    final textTheme = Theme.of(context).textTheme;
++    return Obx(() {
++      final album = controller.album.value;
++      final artists = album.artists?.map((e) => e['name']).join(", ") ?? "";
++      final type = (album.description ?? "Album").isEmpty
++          ? "Album"
++          : album.description!;
++      final meta = album.year == null ? type : "$type • ${album.year}";
++      return Column(
++        crossAxisAlignment: CrossAxisAlignment.start,
++        children: [
++          CoverArtHeader(imageUrl: album.thumbnailUrl),
++          Padding(
++            padding: const EdgeInsets.symmetric(horizontal: 20),
++            child: Text(
++              album.title,
++              maxLines: 2,
++              overflow: TextOverflow.ellipsis,
++              style: textTheme.titleLarge!
++                  .copyWith(fontSize: 30, fontWeight: FontWeight.w800),
++            ),
++          ),
++          Padding(
++            padding: const EdgeInsets.fromLTRB(20, 12, 20, 0),
++            child: Row(children: [
++              ClipOval(
++                child: CachedNetworkImage(
++                  imageUrl: Thumbnail(album.thumbnailUrl).medium,
++                  width: 24,
++                  height: 24,
++                  fit: BoxFit.cover,
++                  errorWidget: (_, __, ___) =>
++                      const SizedBox(width: 24, height: 24),
++                ),
++              ),
++              const SizedBox(width: 8),
++              Expanded(
++                child: Text(artists,
++                    maxLines: 1,
++                    overflow: TextOverflow.ellipsis,
++                    style: textTheme.titleMedium!
++                        .copyWith(fontWeight: FontWeight.w700)),
++              ),
++            ]),
++          ),
++          Padding(
++            padding: const EdgeInsets.fromLTRB(20, 8, 20, 0),
++            child: Text(meta, style: textTheme.titleSmall),
++          ),
++          Padding(
++            padding: const EdgeInsets.fromLTRB(20, 14, 16, 10),
++            child: Row(children: [
++              // small cover thumb (like Spotify)
++              ClipRRect(
++                borderRadius: BorderRadius.circular(4),
++                child: CachedNetworkImage(
++                  imageUrl: Thumbnail(album.thumbnailUrl).medium,
++                  width: 44,
++                  height: 44,
++                  fit: BoxFit.cover,
++                  errorWidget: (_, __, ___) =>
++                      const SizedBox(width: 44, height: 44),
++                ),
++              ),
++              const SizedBox(width: 14),
++              // add / added to library
++              IconButton(
++                tooltip: controller.isAddedToLibrary.isFalse
++                    ? "addToLibrary".tr
++                    : "removeFromLibrary".tr,
++                onPressed: () {
++                  final add = controller.isAddedToLibrary.isFalse;
++                  controller
++                      .addNremoveFromLibrary(album, add: add)
++                      .then((ok) {
++                    if (!context.mounted) return;
++                    ScaffoldMessenger.of(context).showSnackBar(snackbar(
++                        context,
++                        ok
++                            ? (add
++                                ? "albumBookmarkAddAlert".tr
++                                : "albumBookmarkRemoveAlert".tr)
++                            : "operationFailed".tr,
++                        size: SanckBarSize.MEDIUM));
++                  });
++                },
++                icon: controller.isAddedToLibrary.isTrue
++                    ? Container(
++                        width: 28,
++                        height: 28,
++                        decoration: const BoxDecoration(
++                            color: spotifyGreen, shape: BoxShape.circle),
++                        child: const Icon(Icons.check,
++                            size: 18, color: Colors.black),
++                      )
++                    : const Icon(Icons.add_circle_outline, size: 30),
++              ),
++              // download
++              GetX<Downloader>(builder: (dl) {
++                final id = album.browseId;
++                final downloading = dl.playlistQueue.containsKey(id);
++                return IconButton(
++                  tooltip: "downloadAlbumSongs".tr,
++                  onPressed: () {
++                    if (controller.isDownloaded.isTrue) return;
++                    dl.downloadPlaylist(id, controller.songList.toList());
++                  },
++                  icon: controller.isDownloaded.isTrue
++                      ? Container(
++                          width: 28,
++                          height: 28,
++                          decoration: const BoxDecoration(
++                              color: spotifyGreen, shape: BoxShape.circle),
++                          child: const Icon(Icons.arrow_downward,
++                              size: 18, color: Colors.black),
++                        )
++                      : downloading
++                          ? const SizedBox(
++                              width: 26,
++                              height: 26,
++                              child: CircularProgressIndicator(
++                                  strokeWidth: 2.5, color: spotifyGreen))
++                          : const Icon(Icons.arrow_circle_down, size: 30),
++                );
++              }),
++              // more
++              IconButton(
++                onPressed: () => _showMore(context, controller, player),
++                icon: const Icon(Icons.more_vert),
++              ),
++              const Spacer(),
++              // shuffle
++              IconButton(
++                tooltip: "shuffle".tr,
++                onPressed: () {
++                  final songs = List<MediaItem>.from(controller.songList)
++                    ..shuffle();
++                  if (songs.isEmpty) return;
++                  player.playPlayListSong(songs, 0,
++                      playfrom: PlaylingFrom(
++                          name: album.title, type: PlaylingFromType.ALBUM));
++                },
++                icon: const Icon(Icons.shuffle, color: spotifyGreen, size: 28),
++              ),
++              // big green play
++              GestureDetector(
++                onTap: () {
++                  if (controller.songList.isEmpty) return;
++                  player.playPlayListSong(
++                      List<MediaItem>.from(controller.songList), 0,
++                      playfrom: PlaylingFrom(
++                          name: album.title, type: PlaylingFromType.ALBUM));
++                },
++                child: Container(
++                  width: 58,
++                  height: 58,
++                  margin: const EdgeInsets.only(left: 6),
++                  decoration: const BoxDecoration(
++                      color: spotifyGreen, shape: BoxShape.circle),
++                  child:
++                      const Icon(Icons.play_arrow, color: Colors.black, size: 36),
++                ),
++              ),
++            ]),
++          ),
++        ],
++      );
++    });
++  }
++
++  void _showMore(BuildContext context, AlbumScreenController c,
++      PlayerController player) {
++    showModalBottomSheet(
++      constraints: const BoxConstraints(maxWidth: 500),
++      shape: const RoundedRectangleBorder(
++          borderRadius: BorderRadius.vertical(top: Radius.circular(10.0))),
++      context: context,
++      builder: (ctx) => SafeArea(
++        child: Column(mainAxisSize: MainAxisSize.min, children: [
++          ListTile(
++            leading: const Icon(Icons.merge),
++            title: Text("enqueueAlbumSongs".tr),
++            onTap: () {
++              Navigator.of(ctx).pop();
++              player.enqueueSongList(c.songList.toList()).whenComplete(() {
++                if (context.mounted) {
++                  ScaffoldMessenger.of(context).showSnackBar(snackbar(
++                      context, "songEnqueueAlert".tr,
++                      size: SanckBarSize.MEDIUM));
++                }
++              });
++            },
++          ),
++          ListTile(
++            leading: const Icon(Icons.share),
++            title: Text("shareAlbum".tr),
++            onTap: () {
++              Navigator.of(ctx).pop();
++              Share.share(
++                  "https://youtube.com/playlist?list=${c.album.value.audioPlaylistId}");
++            },
++          ),
++        ]),
++      ),
++    );
++  }
++}
+diff --git a/lib/ui/screens/Album/album_screen.dart b/lib/ui/screens/Album/album_screen.dart
+index e1fd1a4..f301e3c 100644
+--- a/lib/ui/screens/Album/album_screen.dart
++++ b/lib/ui/screens/Album/album_screen.dart
+@@ -15,6 +15,8 @@ import '../../widgets/snackbar.dart';
+ import '../../widgets/song_list_tile.dart';
+ import '../../widgets/songinfo_bottom_sheet.dart';
+ import '../../widgets/sort_widget.dart';
++import '../../widgets/cover_gradient_background.dart';
++import 'album_header.dart';
+ import 'album_screen_controller.dart';
+ 
+ class AlbumScreen extends StatelessWidget {
+@@ -48,74 +50,13 @@ class AlbumScreen extends StatelessWidget {
+         },
+         child: Stack(
+           children: [
+-            Obx(
+-              () => albumController.isContentFetched.isTrue
+-                  ? Positioned(
+-                      top: landscape
+-                          ? 0
+-                          : -.25 * albumController.scrollOffset.value,
+-                      right: landscape ? 0 : null,
+-                      child: Obx(() {
+-                        final opacityValue = 1 -
+-                            albumController.scrollOffset.value /
+-                                (size.width - 100);
+-                        return Opacity(
+-                            opacity: opacityValue < 0 ||
+-                                    albumController.isSearchingOn.isTrue
+-                                ? 0
+-                                : opacityValue,
+-                            child: DecoratedBox(
+-                                position: DecorationPosition.foreground,
+-                                decoration: BoxDecoration(
+-                                  boxShadow: [
+-                                    BoxShadow(
+-                                      color: Theme.of(context).canvasColor,
+-                                      spreadRadius: 200,
+-                                      blurRadius: 100,
+-                                      offset: Offset(-size.height, 0),
+-                                    ),
+-                                    BoxShadow(
+-                                      color: Theme.of(context).canvasColor,
+-                                      spreadRadius: 200,
+-                                      blurRadius: 100,
+-                                      offset: Offset(
+-                                          0,
+-                                          landscape
+-                                              ? size.height
+-                                              : size.width + 80),
+-                                    )
+-                                  ],
+-                                ),
+-                                child: CachedNetworkImage(
+-                                  imageUrl: Thumbnail(albumController
+-                                          .album.value.thumbnailUrl)
+-                                      .extraHigh,
+-                                  fit: landscape
+-                                      ? BoxFit.fitHeight
+-                                      : BoxFit.fitWidth,
+-                                  width: landscape ? null : size.width,
+-                                  height: landscape ? size.height : null,
+-                                  // placeholder: (context, n) => Align(
+-                                  //   alignment:landscape?Alignment.centerLeft: Alignment.topCenter,
+-                                  //   child: SizedBox(
+-                                  //     width: landscape ? size.height : size.width,
+-                                  //     height: landscape ? size.height : size.width,
+-                                  //     child: Center(
+-                                  //       child: Icon(Icons.album,
+-                                  //           size: 150,
+-                                  //           color: Theme.of(context)
+-                                  //               .textTheme.titleSmall!.color
+-                                  //         ),
+-                                  //     ),
+-                                  //   ),
+-                                  // ),
+-                                )));
+-                      }))
+-                  : SizedBox(
+-                      height: size.width,
+-                      width: size.width,
+-                    ),
+-            ),
++            Obx(() => Positioned(
++                  top: -albumController.scrollOffset.value,
++                  left: 0,
++                  right: 0,
++                  child: CoverGradientBackground(
++                      imageUrl: albumController.album.value.thumbnailUrl),
++                )),
+             Column(
+               children: [
+                 Container(
+@@ -168,11 +109,7 @@ class AlbumScreen extends StatelessWidget {
+                           behavior: PlaylistAlbumScrollBehaviour(),
+                           child: ListView.builder(
+                             padding: EdgeInsets.only(
+-                              top: albumController.isSearchingOn.isTrue
+-                                  ? 0
+-                                  : landscape
+-                                      ? 150
+-                                      : 200,
++                              top: 0,
+                               bottom: 200,
+                             ),
+                             itemCount: albumController.songList.isEmpty
+@@ -180,208 +117,9 @@ class AlbumScreen extends StatelessWidget {
+                                 : albumController.songList.length + 3,
+                             itemBuilder: (_, index) {
+                               if (index == 0) {
+-                                return Padding(
+-                                  padding: EdgeInsets.only(
+-                                      left:
+-                                          GetPlatform.isDesktop ? 15.0 : 10.0),
+-                                  child: SizedBox(
+-                                      height: 40,
+-                                      child: Row(
+-                                        children: [
+-                                          // Bookmark button
+-                                          Obx(() => IconButton(
+-                                            tooltip: albumController
+-                                                      .isAddedToLibrary.isFalse
+-                                                  ? "addToLibrary".tr
+-                                                  : "removeFromLibrary".tr,
+-                                              splashRadius: 10,
+-                                              onPressed: () {
+-                                                final add = albumController
+-                                                    .isAddedToLibrary.isFalse;
+-                                                albumController
+-                                                    .addNremoveFromLibrary(
+-                                                        albumController
+-                                                            .album.value,
+-                                                        add: add)
+-                                                    .then((value) {
+-                                                  if (!context.mounted) return;
+-
+-                                                  ScaffoldMessenger.of(context)
+-                                                      .showSnackBar(snackbar(
+-                                                          context,
+-                                                          value
+-                                                              ? add
+-                                                                  ? "albumBookmarkAddAlert"
+-                                                                      .tr
+-                                                                  : "albumBookmarkRemoveAlert"
+-                                                                      .tr
+-                                                              : "operationFailed"
+-                                                                  .tr,
+-                                                          size: SanckBarSize
+-                                                              .MEDIUM));
+-                                                });
+-                                              },
+-                                              icon: Icon(albumController
+-                                                      .isAddedToLibrary.isFalse
+-                                                  ? Icons.bookmark_add
+-                                                  : Icons.bookmark_added))),
+-                                          // Play button
+-                                          IconButton(
+-                                            tooltip: "play".tr,
+-                                              onPressed: () {
+-                                                playerController
+-                                                    .playPlayListSong(
+-                                                        List<MediaItem>.from(
+-                                                            albumController
+-                                                                .songList),
+-                                                        0,
+-                                                        playfrom: PlaylingFrom(
+-                                                            name:
+-                                                                albumController
+-                                                                    .album
+-                                                                    .value
+-                                                                    .title,
+-                                                            type:
+-                                                                PlaylingFromType
+-                                                                    .ALBUM));
+-                                              },
+-                                              icon: Icon(
+-                                                Icons.play_circle,
+-                                                color: Theme.of(context)
+-                                                    .textTheme
+-                                                    .titleMedium!
+-                                                    .color,
+-                                              )),
+-                                          // Enqueue button
+-                                          IconButton(
+-                                            tooltip: "enqueueAlbumSongs".tr,
+-                                              onPressed: () {
+-                                                Get.find<PlayerController>()
+-                                                    .enqueueSongList(
+-                                                        albumController.songList
+-                                                            .toList())
+-                                                    .whenComplete(() {
+-                                                  if (context.mounted) {
+-                                                    ScaffoldMessenger.of(
+-                                                            context)
+-                                                        .showSnackBar(snackbar(
+-                                                            context,
+-                                                            "songEnqueueAlert"
+-                                                                .tr,
+-                                                            size: SanckBarSize
+-                                                                .MEDIUM));
+-                                                  }
+-                                                });
+-                                              },
+-                                              icon: Icon(
+-                                                Icons.merge,
+-                                                color: Theme.of(context)
+-                                                    .textTheme
+-                                                    .titleMedium!
+-                                                    .color,
+-                                              )),
+-
+-                                          // Download button
+-                                          GetX<Downloader>(
+-                                              builder: (controller) {
+-                                            final id = albumController
+-                                                .album.value.browseId;
+-                                            return IconButton(
+-                                              tooltip: "downloadAlbumSongs".tr,
+-                                              onPressed: () {
+-                                                if (albumController
+-                                                    .isDownloaded.isTrue) {
+-                                                  return;
+-                                                }
+-                                                controller.downloadPlaylist(
+-                                                    id,
+-                                                    albumController.songList
+-                                                        .toList());
+-                                              },
+-                                              icon: albumController
+-                                                      .isDownloaded.isTrue
+-                                                  ? const Icon(
+-                                                      Icons.download_done)
+-                                                  : controller.playlistQueue
+-                                                              .containsKey(
+-                                                                  id) &&
+-                                                          controller
+-                                                                  .currentPlaylistId
+-                                                                  .toString() ==
+-                                                              id
+-                                                      ? Stack(
+-                                                          children: [
+-                                                            Center(
+-                                                                child: Text(
+-                                                                    "${controller.playlistDownloadingProgress.value}/${albumController.songList.length}",
+-                                                                    style: Theme.of(
+-                                                                            context)
+-                                                                        .textTheme
+-                                                                        .titleMedium!
+-                                                                        .copyWith(
+-                                                                            fontSize:
+-                                                                                10,
+-                                                                            fontWeight:
+-                                                                                FontWeight.bold))),
+-                                                            const Center(
+-                                                                child:
+-                                                                    LoadingIndicator(
+-                                                              dimension: 30,
+-                                                            ))
+-                                                          ],
+-                                                        )
+-                                                      : controller.playlistQueue
+-                                                              .containsKey(id)
+-                                                          ? const Stack(
+-                                                              children: [
+-                                                                Center(
+-                                                                    child: Icon(
+-                                                                  Icons
+-                                                                      .hourglass_bottom,
+-                                                                  size: 20,
+-                                                                )),
+-                                                                Center(
+-                                                                    child:
+-                                                                        LoadingIndicator(
+-                                                                  dimension: 30,
+-                                                                ))
+-                                                              ],
+-                                                            )
+-                                                          : const Icon(
+-                                                              Icons.download),
+-                                            );
+-                                          }),
+-
+-                                          // if (albumController
+-                                          //     .isAddedToLibrary.isTrue)
+-                                          //   IconButton(
+-                                          //       onPressed: () {
+-                                          //         albumController
+-                                          //             .syncPlaylistSongs();
+-                                          //       },
+-                                          //       icon: const Icon(
+-                                          //           Icons.cloud_sync)),
+-
+-                                          IconButton(
+-                                            tooltip: "shareAlbum".tr,
+-                                              visualDensity:
+-                                                  const VisualDensity(
+-                                                      vertical: -3),
+-                                              splashRadius: 10,
+-                                              onPressed: () {
+-                                                Share.share(
+-                                                    "https://youtube.com/playlist?list=${albumController.album.value.audioPlaylistId}");
+-                                              },
+-                                              icon: const Icon(
+-                                                Icons.share,
+-                                                size: 20,
+-                                              )),
+-                                        ],
+-                                      )),
+-                                );
++                                return AlbumHeader(controller: albumController);
+                               } else if (index == 1) {
+-                                return buildTitleSubTitle(
+-                                    context, albumController);
++                                return const SizedBox.shrink();
+                               } else if (index == 2) {
+                                 return SizedBox(
+                                     height: albumController.isSearchingOn.isTrue
+@@ -456,8 +194,7 @@ class AlbumScreen extends StatelessWidget {
+                                     },
+                                     song: albumController.songList[index - 3],
+                                     isPlaylistOrAlbum: true,
+-                                    thumbReplacementWithIndex: true,
+-                                    index: index - 2),
++                                    compact: true),
+                               );
+                             },
+                           ),
+diff --git a/lib/ui/screens/Album/album_screen_controller.dart b/lib/ui/screens/Album/album_screen_controller.dart
+index 6a98ac5..687c44c 100644
+--- a/lib/ui/screens/Album/album_screen_controller.dart
++++ b/lib/ui/screens/Album/album_screen_controller.dart
+@@ -58,30 +58,35 @@ class AlbumScreenController extends PlaylistAlbumScreenControllerBase
+         album.value = album_;
+         animationController.forward();
+       }
+-      // Check if the album is offline
+-      if (!await checkIfAddedToLibrary(albumId)) {
+-        // Fetch album details online
++      // Check if the album is saved in library and has songs stored
++      final added = await checkIfAddedToLibrary(albumId);
++      List<MediaItem> offlineSongs = [];
++      if (added) {
++        final box = await Hive.openBox(albumId);
++        offlineSongs = box.values
++            .map<MediaItem?>((item) => MediaItemBuilder.fromJson(item))
++            .whereType<MediaItem>()
++            .toList();
++        await box.close();
++      }
++      if (offlineSongs.isNotEmpty) {
++        songList.value = offlineSongs;
++      } else {
++        // not in library, or saved without songs -> fetch tracks online
+         final content =
+             await musicServices.getPlaylistOrAlbumSongs(albumId: albumId);
+         content['browseId'] = albumId;
+         album.value = Album.fromJson(content);
+         animationController.forward();
+         songList.value = List<MediaItem>.from(content['tracks']);
+-      } else {
+-        // If the album is offline, fetch the songs from the local database
+-        // Album details are already fetched in _checkIfAddedToLibrary method
+-        final box = await Hive.openBox(albumId);
+-        songList.value = box.values
+-            .map<MediaItem?>((item) => MediaItemBuilder.fromJson(item))
+-            .whereType<MediaItem>()
+-            .toList();
+-        box.close();
++        if (added) updateSongsIntoDb();
+       }
+       checkDownloadStatus();
+       isContentFetched.value = true;
+     } catch (e) {
+       // Handle any errors that occur during the fetch
+       printERROR("Error fetching album details: $e");
++      isContentFetched.value = true;
+     }
+   }
+ 
+diff --git a/lib/ui/screens/Library/library_controller.dart b/lib/ui/screens/Library/library_controller.dart
+index 9a387c2..13e2614 100644
+--- a/lib/ui/screens/Library/library_controller.dart
++++ b/lib/ui/screens/Library/library_controller.dart
+@@ -254,13 +254,13 @@ class LibraryPlaylistsController extends GetxController
+ 
+   void refreshLib() async {
+     final box = await Hive.openBox("LibraryPlaylists");
+-    libraryPlaylists.value = [
++    libraryPlaylists.value = _recentsFirst([
+       ...initPlst,
+       ...(box.values
+           .map<Playlist?>((item) => Playlist.fromJson(item))
+           .whereType<Playlist>()
+           .toList())
+-    ];
++    ]);
+ 
+     final appPrefsBox = Hive.box("AppPrefs");
+     if (appPrefsBox.containsKey("piped")) {
+@@ -271,6 +271,39 @@ class LibraryPlaylistsController extends GetxController
+     await box.close();
+   }
+ 
++  /// playlistId -> last played/opened time (ms since epoch)
++  Map<String, int> _lastPlayedMap() {
++    final raw = Hive.box("AppPrefs").get("playlistLastPlayed");
++    if (raw is Map) {
++      return raw.map((k, v) => MapEntry(k.toString(), (v as num).toInt()));
++    }
++    return {};
++  }
++
++  /// Most recently played playlists first, others keep their order.
++  List<Playlist> _recentsFirst(List<Playlist> list) {
++    final lp = _lastPlayedMap();
++    final indexed = list.asMap().entries.toList();
++    indexed.sort((a, b) {
++      final ta = lp[a.value.playlistId] ?? 0;
++      final tb = lp[b.value.playlistId] ?? 0;
++      if (ta != tb) return tb.compareTo(ta);
++      return a.key.compareTo(b.key);
++    });
++    return indexed.map((e) => e.value).toList();
++  }
++
++  /// Call when a playlist is played/opened so it moves to the top.
++  void markPlayed(String playlistId) {
++    final lp = _lastPlayedMap();
++    lp[playlistId] = DateTime.now().millisecondsSinceEpoch;
++    Hive.box("AppPrefs").put("playlistLastPlayed", lp);
++    final current = libraryPlaylists.toList();
++    if (current.any((e) => e.playlistId == playlistId)) {
++      libraryPlaylists.value = _recentsFirst(current);
++    }
++  }
++
+   void updatePlaylistIntoDb(Playlist playlist) async {
+     final box = await Hive.openBox("LibraryPlaylists");
+     box.put(playlist.playlistId, playlist.toJson());
+@@ -428,8 +461,10 @@ class LibraryPlaylistsController extends GetxController
+   }
+ 
+   void onSort(SortType sortType, bool isAscending) {
+-    final playlists = libraryPlaylists.toList();
+-    playlists.removeRange(0, 4);
++    final initIds = initPlst.map((e) => e.playlistId).toSet();
++    final playlists = libraryPlaylists
++        .where((e) => !initIds.contains(e.playlistId))
++        .toList();
+     sortPlayLists(playlists, sortType, isAscending);
+     playlists.insertAll(0, initPlst);
+     libraryPlaylists.value = playlists;
+diff --git a/lib/ui/screens/Playlist/playlist_screen.dart b/lib/ui/screens/Playlist/playlist_screen.dart
+index ddb7353..4c27a75 100644
+--- a/lib/ui/screens/Playlist/playlist_screen.dart
++++ b/lib/ui/screens/Playlist/playlist_screen.dart
+@@ -18,6 +18,7 @@ import '../../widgets/snackbar.dart';
+ import '../../widgets/song_list_tile.dart';
+ import '../../widgets/songinfo_bottom_sheet.dart';
+ import '../../widgets/sort_widget.dart';
++import '../../widgets/cover_gradient_background.dart';
+ import '../Library/library_controller.dart';
+ import 'playlist_screen_controller.dart';
+ 
+@@ -53,60 +54,13 @@ class PlaylistScreen extends StatelessWidget {
+         },
+         child: Stack(
+           children: [
+-            Obx(
+-              () => playlistController.isContentFetched.isTrue
+-                  ? Positioned(
+-                      top: landscape
+-                          ? 0
+-                          : -.25 * playlistController.scrollOffset.value,
+-                      right: landscape ? 0 : null,
+-                      child: Obx(() {
+-                        final opacityValue = 1 -
+-                            playlistController.scrollOffset.value /
+-                                (size.width - 100);
+-                        return Opacity(
+-                          opacity: opacityValue < 0 ||
+-                                  playlistController.isSearchingOn.isTrue && !landscape
+-                              ? 0
+-                              : opacityValue,
+-                          child: DecoratedBox(
+-                            position: DecorationPosition.foreground,
+-                            decoration: BoxDecoration(
+-                              boxShadow: [
+-                                BoxShadow(
+-                                  color: Theme.of(context).canvasColor,
+-                                  spreadRadius: 200,
+-                                  blurRadius: 100,
+-                                  offset: Offset(-size.height, 0),
+-                                ),
+-                                BoxShadow(
+-                                  color: Theme.of(context).canvasColor,
+-                                  spreadRadius: 200,
+-                                  blurRadius: 100,
+-                                  offset: Offset(
+-                                      0,
+-                                      landscape
+-                                          ? size.height
+-                                          : size.width + 80),
+-                                )
+-                              ],
+-                            ),
+-                            child: CachedNetworkImage(
+-                              imageUrl: Thumbnail(playlistController
+-                                      .playlist.value.thumbnailUrl)
+-                                  .extraHigh,
+-                              fit: landscape ? BoxFit.fitHeight : BoxFit.cover,
+-                              width: landscape ? null : size.width,
+-                              height: landscape ? size.height : size.width,
+-                            ),
+-                          ),
+-                        );
+-                      }))
+-                  : SizedBox(
+-                      height: size.width,
+-                      width: size.width,
+-                    ),
+-            ),
++            Obx(() => Positioned(
++                  top: -playlistController.scrollOffset.value,
++                  left: 0,
++                  right: 0,
++                  child: CoverGradientBackground(
++                      imageUrl: playlistController.playlist.value.thumbnailUrl),
++                )),
+             Column(
+               children: [
+                 Container(
+@@ -238,11 +192,7 @@ class PlaylistScreen extends StatelessWidget {
+                           child: ListView.builder(
+                             addRepaintBoundaries: false,
+                             padding: EdgeInsets.only(
+-                              top: playlistController.isSearchingOn.isTrue
+-                                  ? 0
+-                                  : landscape
+-                                      ? 150
+-                                      : 200,
++                              top: 0,
+                               bottom: 200,
+                             ),
+                             itemCount: playlistController.songList.isEmpty ||
+@@ -251,7 +201,12 @@ class PlaylistScreen extends StatelessWidget {
+                                 : playlistController.songList.length + 3,
+                             itemBuilder: (_, index) {
+                               if (index == 0) {
+-                                return Padding(
++                                return Column(children: [
++                                  if (playlistController.isSearchingOn.isFalse)
++                                    CoverArtHeader(
++                                        imageUrl: playlistController
++                                            .playlist.value.thumbnailUrl),
++                                  Padding(
+                                   padding: const EdgeInsets.only(left: 15.0),
+                                   child: SizedBox(
+                                     height: 40,
+@@ -310,7 +265,8 @@ class PlaylistScreen extends StatelessWidget {
+                                           IconButton(
+                                             tooltip: "play".tr,
+                                               onPressed: () {
+-                                                playerController.playPlayListSong(
++                                                playlistController.markPlayed();
++                                playerController.playPlayListSong(
+                                                     List<MediaItem>.from(
+                                                         playlistController
+                                                             .songList),
+@@ -366,7 +322,8 @@ class PlaylistScreen extends StatelessWidget {
+                                                             .songList);
+                                                 songsToplay.shuffle();
+                                                 songsToplay.shuffle();
+-                                                playerController.playPlayListSong(
++                                                playlistController.markPlayed();
++                                playerController.playPlayListSong(
+                                                     songsToplay, 0,
+                                                     playfrom: PlaylingFrom(
+                                                         name: playlistController
+@@ -546,7 +503,8 @@ class PlaylistScreen extends StatelessWidget {
+                                       ),
+                                     ),
+                                   ),
+-                                );
++                                  ),
++                                ]);
+                               } else if (index == 1) {
+                                 final title =
+                                     playlistController.playlist.value.title;
+@@ -693,7 +651,8 @@ class PlaylistScreen extends StatelessWidget {
+                                     const EdgeInsets.only(left: 20.0, right: 5),
+                                 child: SongListTile(
+                                   onTap: () {
+-                                    playerController.playPlayListSong(
++                                    playlistController.markPlayed();
++                                playerController.playPlayListSong(
+                                         List<MediaItem>.from(
+                                             playlistController.songList),
+                                         index - 3,
+diff --git a/lib/ui/screens/Playlist/playlist_screen_controller.dart b/lib/ui/screens/Playlist/playlist_screen_controller.dart
+index 46b9498..2c54d6b 100644
+--- a/lib/ui/screens/Playlist/playlist_screen_controller.dart
++++ b/lib/ui/screens/Playlist/playlist_screen_controller.dart
+@@ -152,6 +152,12 @@ class PlaylistScreenController extends PlaylistAlbumScreenControllerBase
+     });
+   }
+ 
++  void markPlayed() {
++    final id = playlist.value.playlistId;
++    if (id.isEmpty) return;
++    Get.find<LibraryPlaylistsController>().markPlayed(id);
++  }
++
+   @override
+   Future<bool> checkIfAddedToLibrary(String id) async {
+     final box = await Hive.openBox("LibraryPlaylists");
+@@ -174,12 +180,12 @@ class PlaylistScreenController extends PlaylistAlbumScreenControllerBase
+         final box = await Hive.openBox("LibraryPlaylists");
+         final id = content.playlistId;
+         if (add) {
+-          box.put(id, content.toJson());
+-          updateSongsIntoDb();
++          await box.put(id, content.toJson());
++          await updateSongsIntoDb();
+         } else {
+-          box.delete(id);
++          await box.delete(id);
+           final songsBox = await Hive.openBox(id);
+-          songsBox.deleteFromDisk();
++          await songsBox.deleteFromDisk();
+         }
+         isAddedToLibrary.value = add;
+       }
+diff --git a/lib/ui/utils/cover_color.dart b/lib/ui/utils/cover_color.dart
+new file mode 100644
+index 0000000..29397ac
+--- /dev/null
++++ b/lib/ui/utils/cover_color.dart
+@@ -0,0 +1,44 @@
++import 'dart:io';
++
++import 'package:cached_network_image/cached_network_image.dart';
++import 'package:flutter/material.dart';
++import 'package:palette_generator/palette_generator.dart';
++
++/// Extracts a gradient-friendly color from a cover image (cached per url).
++class CoverColor {
++  static final Map<String, Color> _cache = {};
++
++  static ImageProvider _provider(String url) {
++    if (url.startsWith('/') || url.startsWith('file:')) {
++      return FileImage(File(url.replaceFirst('file://', '')));
++    }
++    return CachedNetworkImageProvider(url);
++  }
++
++  static Future<Color?> fromUrl(String url) async {
++    if (url.isEmpty) return null;
++    final cached = _cache[url];
++    if (cached != null) return cached;
++    try {
++      final generator = await PaletteGenerator.fromImageProvider(
++        _provider(url),
++        size: const Size(120, 120),
++        maximumColorCount: 16,
++      );
++      final picked = generator.vibrantColor?.color ??
++          generator.dominantColor?.color ??
++          generator.mutedColor?.color;
++      if (picked == null) return null;
++      final hsl = HSLColor.fromColor(picked);
++      // keep it dark enough that white text stays readable
++      final color = hsl
++          .withLightness(hsl.lightness.clamp(0.22, 0.36))
++          .withSaturation(hsl.saturation.clamp(0.0, 0.7))
++          .toColor();
++      _cache[url] = color;
++      return color;
++    } catch (_) {
++      return null;
++    }
++  }
++}
+diff --git a/lib/ui/widgets/add_to_playlist.dart b/lib/ui/widgets/add_to_playlist.dart
+index 1cf0129..2bd3de1 100644
+--- a/lib/ui/widgets/add_to_playlist.dart
++++ b/lib/ui/widgets/add_to_playlist.dart
+@@ -8,6 +8,7 @@ import '../../services/piped_service.dart';
+ import '/models/media_Item_builder.dart';
+ import '/ui/widgets/create_playlist_dialog.dart';
+ import '../../models/playlist.dart';
++import '../screens/Library/library_controller.dart';
+ import 'common_dialog_widget.dart';
+ import 'snackbar.dart';
+ 
+@@ -179,6 +180,7 @@ class AddToPlaylistController extends GetxController {
+         .whereType<Playlist>()
+         .toList();
+     localPlaylists = playlists.toList();
++    if (!Get.find<PipedServices>().isLoggedIn) return;
+     final res = await Get.find<PipedServices>().getAllPlaylists();
+     if (res.code == 1) {
+       pipedPlaylists = res.response
+@@ -212,6 +214,9 @@ class AddToPlaylistController extends GetxController {
+       }
+       await plstBox.close();
+       additionInProgress.value = false;
++      if (Get.isRegistered<LibraryPlaylistsController>()) {
++        Get.find<LibraryPlaylistsController>().refreshLib();
++      }
+       return true;
+     } else {
+       final videosId = songs.map((e) => e.id).toList();
+diff --git a/lib/ui/widgets/cover_gradient_background.dart b/lib/ui/widgets/cover_gradient_background.dart
+new file mode 100644
+index 0000000..cf9b826
+--- /dev/null
++++ b/lib/ui/widgets/cover_gradient_background.dart
+@@ -0,0 +1,97 @@
++import 'package:cached_network_image/cached_network_image.dart';
++import 'package:flutter/material.dart';
++
++import '../utils/cover_color.dart';
++import '/models/thumbnail.dart';
++
++/// Spotify-style header gradient that follows the dominant color of the cover.
++class CoverGradientBackground extends StatefulWidget {
++  const CoverGradientBackground(
++      {super.key, required this.imageUrl, this.height = 460});
++  final String imageUrl;
++  final double height;
++
++  @override
++  State<CoverGradientBackground> createState() =>
++      _CoverGradientBackgroundState();
++}
++
++class _CoverGradientBackgroundState extends State<CoverGradientBackground> {
++  Color? _color;
++
++  @override
++  void initState() {
++    super.initState();
++    _load();
++  }
++
++  @override
++  void didUpdateWidget(covariant CoverGradientBackground old) {
++    super.didUpdateWidget(old);
++    if (old.imageUrl != widget.imageUrl) _load();
++  }
++
++  Future<void> _load() async {
++    final url = widget.imageUrl;
++    final c = await CoverColor.fromUrl(url);
++    if (mounted && url == widget.imageUrl) setState(() => _color = c);
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    final canvas = Theme.of(context).canvasColor;
++    final fallback = Color.lerp(canvas, Colors.white, 0.12)!;
++    return TweenAnimationBuilder<Color?>(
++      tween: ColorTween(begin: fallback, end: _color ?? fallback),
++      duration: const Duration(milliseconds: 600),
++      builder: (context, c, _) => Container(
++        height: widget.height,
++        decoration: BoxDecoration(
++          gradient: LinearGradient(
++            begin: Alignment.topCenter,
++            end: Alignment.bottomCenter,
++            colors: [c!, Color.lerp(c, canvas, 0.65)!, canvas],
++            stops: const [0.0, 0.5, 1.0],
++          ),
++        ),
++      ),
++    );
++  }
++}
++
++/// Centered rounded cover with soft shadow (Spotify header).
++class CoverArtHeader extends StatelessWidget {
++  const CoverArtHeader({super.key, required this.imageUrl});
++  final String imageUrl;
++
++  @override
++  Widget build(BuildContext context) {
++    final w = MediaQuery.of(context).size.width;
++    final side = (w * 0.62).clamp(160.0, 280.0);
++    return Padding(
++      padding: const EdgeInsets.only(top: 6, bottom: 22),
++      child: Center(
++        child: Container(
++          width: side,
++          height: side,
++          decoration: BoxDecoration(
++            borderRadius: BorderRadius.circular(6),
++            boxShadow: const [
++              BoxShadow(
++                  color: Colors.black54, blurRadius: 30, offset: Offset(0, 12))
++            ],
++          ),
++          child: ClipRRect(
++            borderRadius: BorderRadius.circular(6),
++            child: CachedNetworkImage(
++              imageUrl: Thumbnail(imageUrl).extraHigh,
++              fit: BoxFit.cover,
++              errorWidget: (_, __, ___) =>
++                  const ColoredBox(color: Colors.black26),
++            ),
++          ),
++        ),
++      ),
++    );
++  }
++}
+diff --git a/lib/ui/widgets/song_list_tile.dart b/lib/ui/widgets/song_list_tile.dart
+index c38e3da..3b83d64 100644
+--- a/lib/ui/widgets/song_list_tile.dart
++++ b/lib/ui/widgets/song_list_tile.dart
+@@ -21,12 +21,16 @@ class SongListTile extends StatelessWidget with RemoveSongFromPlaylistMixin {
+       this.playlist,
+       this.isPlaylistOrAlbum = false,
+       this.thumbReplacementWithIndex = false,
++      this.compact = false,
+       this.index});
+   final Playlist? playlist;
+   final MediaItem song;
+   final VoidCallback? onTap;
+   final bool isPlaylistOrAlbum;
+ 
++  /// Spotify-like row: no thumbnail/number, always shows the 3-dot menu
++  final bool compact;
++
+   /// Valid for Album songs
+   final bool thumbReplacementWithIndex;
+   final int? index;
+@@ -127,8 +131,11 @@ class SongListTile extends StatelessWidget with RemoveSongFromPlaylistMixin {
+                 ),
+               ).whenComplete(() => Get.delete<SongInfoController>());
+             },
+-            contentPadding: const EdgeInsets.only(top: 0, left: 5, right: 30),
+-            leading: thumbReplacementWithIndex
++            contentPadding: EdgeInsets.only(
++                top: 0, left: compact ? 15 : 5, right: compact ? 4 : 30),
++            leading: compact
++                ? null
++                : thumbReplacementWithIndex
+                 ? SizedBox(
+                     width: 27.5,
+                     height: 55,
+@@ -147,20 +154,47 @@ class SongListTile extends StatelessWidget with RemoveSongFromPlaylistMixin {
+               delay: const Duration(milliseconds: 300),
+               duration: const Duration(seconds: 5),
+               id: song.title.hashCode.toString(),
+-              child: Text(
+-                song.title.length > 50
+-                    ? song.title.substring(0, 50)
+-                    : song.title,
+-                maxLines: 1,
+-                style: Theme.of(context).textTheme.titleMedium,
+-              ),
++              child: Obx(() {
++                final playing = isPlaylistOrAlbum &&
++                    playerController.currentSong.value?.id == song.id;
++                return Text(
++                  song.title.length > 50
++                      ? song.title.substring(0, 50)
++                      : song.title,
++                  maxLines: 1,
++                  style: Theme.of(context).textTheme.titleMedium!.copyWith(
++                      color: playing ? const Color(0xFF1DB954) : null,
++                      fontWeight: playing ? FontWeight.w700 : null),
++                );
++              }),
+             ),
+             subtitle: Text(
+               "${song.artist}",
+               maxLines: 1,
+               style: Theme.of(context).textTheme.titleSmall,
+             ),
+-            trailing: SizedBox(
++            trailing: compact
++                ? IconButton(
++                    splashRadius: 20,
++                    onPressed: () {
++                      showModalBottomSheet(
++                        constraints: const BoxConstraints(maxWidth: 500),
++                        shape: const RoundedRectangleBorder(
++                          borderRadius:
++                              BorderRadius.vertical(top: Radius.circular(10.0)),
++                        ),
++                        isScrollControlled: true,
++                        context: playerController
++                            .homeScaffoldkey.currentState!.context,
++                        barrierColor: Colors.transparent.withAlpha(100),
++                        builder: (context) => SongInfoBottomSheet(
++                          song,
++                          playlist: playlist,
++                        ),
++                      ).whenComplete(() => Get.delete<SongInfoController>());
++                    },
++                    icon: const Icon(Icons.more_vert))
++                : SizedBox(
+               width: Get.size.width > 800 ? 80 : 40,
+               child: Row(
+                 mainAxisAlignment: MainAxisAlignment.end,
