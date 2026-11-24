@@ -1,6 +1,10 @@
 name: Build APK with Spotify
 on:
   workflow_dispatch:
+  push:
+    paths:
+      - 'spotify_login_full_ui (1).patch'
+      - '.github/workflows/apk-spotify.yml'
 
 jobs:
   apk:
