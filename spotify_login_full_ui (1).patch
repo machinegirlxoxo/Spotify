@@ -680,9 +680,9 @@ index 0000000..b0cf891
 +    try {
 +      final uri = song.artUri;
 +      if (uri == null) return;
-+      final ImageProvider provider = uri.isScheme('file')
-+          ? FileImage(File(uri.toFilePath()))
-+          : CachedNetworkImageProvider(uri.toString());
++      final ImageProvider<Object> provider = uri.isScheme('file')
++          ? FileImage(File(uri.toFilePath())) as ImageProvider<Object>
++          : CachedNetworkImageProvider(uri.toString()) as ImageProvider<Object>;
 +      final generator = await PaletteGenerator.fromImageProvider(
 +          ResizeImage(provider, width: 120, height: 120),
 +          maximumColorCount: 12);
