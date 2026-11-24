@@ -5334,7 +5334,7 @@ diff --git a/lib/ui/screens/Search/components/search_item.dart b/lib/ui/screens/
 diff --git a/lib/ui/widgets/song_list_tile.dart b/lib/ui/widgets/song_list_tile.dart
 --- a/lib/ui/widgets/song_list_tile.dart
 +++ b/lib/ui/widgets/song_list_tile.dart
-@@ -1,213 +1,213 @@
+@@ -1,213 +1,220 @@
 -import 'package:audio_service/audio_service.dart' show MediaItem;
 -import 'package:flutter/gestures.dart';
 -import 'package:flutter/material.dart';
@@ -5548,7 +5548,7 @@ diff --git a/lib/ui/widgets/song_list_tile.dart b/lib/ui/widgets/song_list_tile.
 -        ));
 -  }
 -}
-+import 'package:audio_service/audio_service.dart' show MediaItem;
++import 'package:audio_service/audio_service.dart' show MediaItem, PlayButtonState;
 +import 'package:flutter/gestures.dart';
 +import 'package:flutter/material.dart';
 +import 'package:flutter_slidable/flutter_slidable.dart';
@@ -5697,13 +5697,20 @@ diff --git a/lib/ui/widgets/song_list_tile.dart b/lib/ui/widgets/song_list_tile.
 +              delay: const Duration(milliseconds: 300),
 +              duration: const Duration(seconds: 5),
 +              id: song.title.hashCode.toString(),
-+              child: Text(
-+                song.title.length > 50
-+                    ? song.title.substring(0, 50)
-+                    : song.title,
-+                maxLines: 1,
-+                style: Theme.of(context).textTheme.titleMedium,
-+              ),
++              child: Obx(() {
++                final isPlaying = isPlaylistOrAlbum &&
++                    playerController.currentSong.value?.id == song.id &&
++                    playerController.buttonState.value == PlayButtonState.playing;
++                return Text(
++                  song.title.length > 50
++                      ? song.title.substring(0, 50)
++                      : song.title,
++                  maxLines: 1,
++                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
++                        color: isPlaying ? const Color(0xFF1ED760) : null,
++                      ),
++                );
++              }),
 +            ),
 +            subtitle: Text(
 +              "${song.artist}",
