@@ -1,0 +1,3291 @@
+diff --git a/lib/main.dart b/lib/main.dart
+index 3c898d2..885e8c3 100644
+--- a/lib/main.dart
++++ b/lib/main.dart
+@@ -1,5 +1,6 @@
+ import 'package:audio_service/audio_service.dart';
+ import 'package:flutter/material.dart';
++import '/services/spotify_service.dart';
+ import 'package:flutter/services.dart';
+ import 'package:get/get.dart';
+ import 'package:hive_flutter/hive_flutter.dart';
+@@ -91,6 +92,7 @@ Future<void> startApplicationServices() async {
+   Get.lazyPut(() => LibraryPlaylistsController(), fenix: true);
+   Get.lazyPut(() => LibraryAlbumsController(), fenix: true);
+   Get.lazyPut(() => LibraryArtistsController(), fenix: true);
++  Get.put(SpotifyService(), permanent: true);
+   Get.lazyPut(() => SettingsScreenController(), fenix: true);
+   Get.lazyPut(() => Downloader(), fenix: true);
+   if (GetPlatform.isDesktop) {
+diff --git a/lib/services/spotify_service.dart b/lib/services/spotify_service.dart
+new file mode 100644
+index 0000000..672504c
+--- /dev/null
++++ b/lib/services/spotify_service.dart
+@@ -0,0 +1,531 @@
++import 'dart:async';
++import 'dart:convert';
++import 'dart:math';
++
++import 'package:audio_service/audio_service.dart';
++import 'package:crypto/crypto.dart';
++import 'package:dio/dio.dart';
++import 'package:get/get.dart';
++import 'package:hive/hive.dart';
++
++import '../models/album.dart';
++import '../models/artist.dart';
++import '../models/media_Item_builder.dart';
++import '../models/playlist.dart';
++import '../ui/screens/Library/library_controller.dart';
++import '../utils/helper.dart';
++import 'music_service.dart';
++
++class SpotifyException implements Exception {
++  SpotifyException(this.code, this.message);
++  final int code;
++  final String message;
++  @override
++  String toString() => 'Spotify $code: $message';
++}
++
++/// Logs into Spotify through the real login page (WebView) and uses the same
++/// internal GraphQL API as the Spotify web player, so no developer Client ID
++/// and no Premium subscription are needed. Every track is then matched to
++/// YouTube Music and streamed from there.
++///
++/// Approach based on the open-source "Meld" app. This is unofficial and
++/// Spotify can change it at any time.
++class SpotifyService extends GetxService {
++  static const loginUrl =
++      'https://accounts.spotify.com/login?continue=https%3A%2F%2Fopen.spotify.com%2F';
++  static const userAgent =
++      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
++  static const _gqlUrl = 'https://api-partner.spotify.com/pathfinder/v2/query';
++  static const _nuanceUrl =
++      'https://api.github.com/gists/22ed9c6ba463899e933427f7de1f0eef';
++  static const _hashRegistry =
++      'https://francescograzioso.github.io/Meld/spotify-gql-hashes.json';
++
++  // Persisted-query hashes. Spotify rotates these, so they are refreshed from
++  // a community registry at import time.
++  final Map<String, String> _hashes = {
++    'libraryV3':
++        '390c78e5b951029bad359785e69b07b536a509c581cbcd0aded5e5067f187455',
++    'fetchPlaylist':
++        '21ea11a6ac75a5f3e01fd365d29c18e0a4a8b7dc09f89bbb5d73910190c6acaf',
++    'fetchLibraryTracks':
++        '087278b20b743578a6262c2b0b4bcd20d879c503cc359a2285baf083ef944240',
++  };
++
++  final _dio = Dio(BaseOptions(
++      headers: {'User-Agent': userAgent, 'Accept-Language': 'en'},
++      validateStatus: (_) => true));
++  final isLoggedIn = false.obs;
++  final isImporting = false.obs;
++  final progress = 0.0.obs;
++  final status = ''.obs;
++
++  String? _accessToken;
++  int _tokenExpiry = 0;
++
++  Box get _box => Hive.box('AppPrefs');
++  Map get _data => (_box.get('spotify') ?? {}) as Map;
++  void _save(Map m) => _box.put('spotify', {..._data, ...m});
++
++  String get _spDc => (_data['spDc'] ?? '') as String;
++  bool get skipped => (_data['skipped'] ?? false) as bool;
++  bool get needsLogin => !isLoggedIn.value && !skipped;
++
++  @override
++  void onInit() {
++    isLoggedIn.value = _spDc.isNotEmpty;
++    super.onInit();
++  }
++
++  /// Called by the login WebView once it has captured the `sp_dc` cookie.
++  void onLoggedIn(String spDc) {
++    _save({'spDc': spDc, 'skipped': false});
++    _accessToken = null;
++    isLoggedIn.value = true;
++  }
++
++  void skip() => _save({'skipped': true});
++
++  void logout() {
++    _save({'spDc': '', 'skipped': false});
++    _accessToken = null;
++    isLoggedIn.value = false;
++  }
++
++  // ---------------------------------------------------------------- token --
++  Future<String> _token({bool force = false}) async {
++    if (!force &&
++        _accessToken != null &&
++        DateTime.now().millisecondsSinceEpoch < _tokenExpiry) {
++      return _accessToken!;
++    }
++    // 1. TOTP secret (rotated by Spotify, kept up to date by the community)
++    final gist = await _dio.get(_nuanceUrl);
++    if (gist.statusCode != 200) {
++      throw SpotifyException(503, 'Could not fetch TOTP secret');
++    }
++    final files = (gist.data is String ? jsonDecode(gist.data) : gist.data)['files'] as Map;
++    final nuances = jsonDecode((files.values.first as Map)['content'] as String) as List;
++    nuances.sort((a, b) => (a['v'] as int).compareTo(b['v'] as int));
++    final nuance = nuances.last;
++
++    // 2. Spotify server time
++    final t = await _dio.get('https://open.spotify.com/api/server-time');
++    final tData = t.data is String ? jsonDecode(t.data) : t.data;
++    final serverTime = (tData['serverTime'] as num).toInt();
++
++    // 3. TOTP + sp_dc cookie -> web player access token
++    final totp = _totp(nuance['s'] as String, serverTime);
++    final res = await _dio.get('https://open.spotify.com/api/token',
++        queryParameters: {
++          'reason': 'transport',
++          'productType': 'web-player',
++          'totp': totp,
++          'totpServer': totp,
++          'totpVer': nuance['v'],
++        },
++        options: Options(headers: {'Cookie': 'sp_dc=$_spDc'}));
++    if (res.statusCode != 200) {
++      throw SpotifyException(res.statusCode ?? 0, 'Token request failed: ${res.data}');
++    }
++    final d = res.data is String ? jsonDecode(res.data) : res.data;
++    if (d['isAnonymous'] == true || (d['accessToken'] ?? '').toString().isEmpty) {
++      logout();
++      throw SpotifyException(401, 'Session expired, please log in again');
++    }
++    _accessToken = d['accessToken'];
++    _tokenExpiry = ((d['accessTokenExpirationTimestampMs'] ?? 0) as num).toInt() - 60000;
++    return _accessToken!;
++  }
++
++  String _totp(String secret, int serverTimeSec) {
++    const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
++    final bytes = <int>[];
++    var buffer = 0, bits = 0;
++    for (final c in secret.toUpperCase().replaceAll('=', '').split('')) {
++      final v = alphabet.indexOf(c);
++      if (v < 0) continue;
++      buffer = (buffer << 5) | v;
++      bits += 5;
++      if (bits >= 8) {
++        bits -= 8;
++        bytes.add((buffer >> bits) & 0xFF);
++      }
++    }
++    var step = serverTimeSec ~/ 30;
++    final msg = List<int>.filled(8, 0);
++    for (var i = 7; i >= 0; i--) {
++      msg[i] = step & 0xFF;
++      step >>= 8;
++    }
++    final hash = Hmac(sha1, bytes).convert(msg).bytes;
++    final off = hash.last & 0x0F;
++    final code = ((hash[off] & 0x7F) << 24) |
++        ((hash[off + 1] & 0xFF) << 16) |
++        ((hash[off + 2] & 0xFF) << 8) |
++        (hash[off + 3] & 0xFF);
++    return (code % 1000000).toString().padLeft(6, '0');
++  }
++
++  // ------------------------------------------------------------- GraphQL --
++  Future<void> _refreshHashes() async {
++    try {
++      final r = await _dio.get(_hashRegistry);
++      final d = r.data is String ? jsonDecode(r.data) : r.data;
++      final ops = d['operations'] as Map;
++      for (final k in _hashes.keys.toList()) {
++        if (ops[k]?['hash'] != null) _hashes[k] = ops[k]['hash'];
++      }
++    } catch (_) {}
++  }
++
++  Future<Map> _gql(String op, Map<String, dynamic> variables) async {
++    for (var attempt = 0; attempt < 4; attempt++) {
++      final res = await _dio.post(_gqlUrl,
++          data: jsonEncode({
++            'variables': variables,
++            'operationName': op,
++            'extensions': {
++              'persistedQuery': {'version': 1, 'sha256Hash': _hashes[op]}
++            }
++          }),
++          options: Options(headers: {
++            'Authorization': 'Bearer ${await _token()}',
++            'app-platform': 'WebPlayer',
++            'Origin': 'https://open.spotify.com',
++            'Referer': 'https://open.spotify.com/',
++            'Content-Type': 'application/json;charset=UTF-8',
++            'Accept': 'application/json',
++          }));
++      final code = res.statusCode ?? 0;
++      if (code == 401) {
++        await _token(force: true);
++        continue;
++      }
++      if (code == 429) {
++        final wait = int.tryParse('${res.headers.value('retry-after')}') ?? 2 * (attempt + 1);
++        await Future.delayed(Duration(seconds: wait));
++        continue;
++      }
++      if (code == 412) {
++        throw SpotifyException(412, 'Spotify changed its internal API ($op). Update the app.');
++      }
++      if (code < 200 || code >= 300) {
++        throw SpotifyException(code, '${res.data}');
++      }
++      final body = (res.data is String ? jsonDecode(res.data) : res.data) as Map;
++      final errors = body['errors'];
++      if (errors is List && errors.isNotEmpty) {
++        final msg = '${errors[0]['message']}';
++        if (msg.contains('PersistedQueryNotFound')) {
++          throw SpotifyException(412, 'Spotify changed its internal API ($op). Update the app.');
++        }
++        throw SpotifyException(400, msg);
++      }
++      return body;
++    }
++    throw SpotifyException(429, 'Rate limited');
++  }
++
++  // ------------------------------------------------------- data fetchers --
++  Future<List<Map>> _library(String filter) async {
++    final out = <Map>[];
++    var offset = 0;
++    while (true) {
++      final r = await _gql('libraryV3', {
++        'filters': [filter],
++        'order': null,
++        'textFilter': '',
++        'features': ['LIKED_SONGS', 'YOUR_EPISODES_V2', 'PRERELEASES', 'EVENTS'],
++        'limit': 50,
++        'offset': offset,
++        'flatten': filter == 'Playlists',
++        'expandedFolders': [],
++        'folderUri': null,
++        'includeFoldersWhenFlattening': filter != 'Playlists',
++      });
++      final lib = r['data']?['me']?['libraryV3'];
++      if (lib == null) throw SpotifyException(500, 'Invalid libraryV3 response');
++      final items = (lib['items'] as List? ?? []);
++      for (final it in items) {
++        final w = it['item'];
++        if (w is Map) out.add(w);
++      }
++      final total = (lib['totalCount'] ?? 0) as int;
++      offset += 50;
++      if (items.isEmpty || offset >= total) break;
++    }
++    return out;
++  }
++
++  Map? _trackFrom(Map? data, {String? uri}) {
++    if (data == null) return null;
++    final u = uri ?? data['uri'] ?? data['_uri'] ?? '';
++    final artists = ((data['artists']?['items'] as List?) ?? [])
++        .map((a) => a['profile']?['name'])
++        .whereType<String>()
++        .toList();
++    int ms = 0;
++    ms = (data['duration']?['totalMilliseconds'] ?? data['durationMs'] ?? 0) as int;
++    return {
++      'id': '$u'.split(':').last,
++      'name': data['name'] ?? '',
++      'artists': artists,
++      'durationMs': ms,
++      'local': '$u'.contains(':local:'),
++    };
++  }
++
++  Future<List<Map>> _likedTracks() async {
++    final out = <Map>[];
++    var offset = 0;
++    while (true) {
++      final r = await _gql('fetchLibraryTracks', {'offset': offset, 'limit': 50});
++      final tracks = r['data']?['me']?['library']?['tracks'];
++      if (tracks == null) break;
++      final items = (tracks['items'] as List? ?? []);
++      for (final e in items) {
++        final w = e['track'];
++        final t = _trackFrom(w?['data'], uri: w?['_uri'] ?? w?['uri']);
++        if (t != null) out.add(t);
++      }
++      offset += 50;
++      if (items.isEmpty || offset >= ((tracks['totalCount'] ?? 0) as int)) break;
++    }
++    return out;
++  }
++
++  Future<List<Map>> _playlistTracks(String id) async {
++    final out = <Map>[];
++    var offset = 0;
++    while (true) {
++      final r = await _gql('fetchPlaylist', {
++        'uri': 'spotify:playlist:$id',
++        'offset': offset,
++        'limit': 100,
++        'enableWatchFeedEntrypoint': false,
++      });
++      final content = r['data']?['playlistV2']?['content'];
++      if (content == null) break;
++      final items = (content['items'] as List? ?? []);
++      for (final e in items) {
++        final w = e['itemV2'];
++        final t = _trackFrom(w?['data'], uri: w?['_uri'] ?? w?['uri']);
++        if (t != null) out.add(t);
++      }
++      offset += 100;
++      if (items.isEmpty || offset >= ((content['totalCount'] ?? 0) as int)) break;
++    }
++    return out;
++  }
++
++  // --------------------------------------------------------------- import --
++  Future<String?> importLibrary() async {
++    if (isImporting.value) return null;
++    isImporting.value = true;
++    progress.value = 0;
++    try {
++      status.value = 'Reading your Spotify library…';
++      await _refreshHashes();
++      final playlists = (await _library('Playlists'))
++          .where((w) =>
++              '${w['__typename']}'.contains('Playlist') && w['data'] is Map)
++          .toList();
++      final artists = (await _library('Artists'))
++          .where((w) => '${w['__typename']}'.contains('Artist') && w['data'] is Map)
++          .toList();
++      List<Map> albums = [];
++      try {
++        albums = (await _library('Albums'))
++            .where((w) => '${w['__typename']}'.contains('Album') && w['data'] is Map)
++            .toList();
++      } catch (e) {
++        printERROR('Spotify albums fetch failed: $e');
++      }
++
++      final jobs = <Future<void> Function()>[];
++      final totalSteps = playlists.length + 1 + albums.length + artists.length;
++      var done = 0;
++      void tick(String s) {
++        done++;
++        progress.value = done / max(totalSteps, 1);
++        status.value = s;
++      }
++
++      jobs.add(() async {
++        final liked = await _likedTracks();
++        await _importTrackList('LIBSP_liked', 'Spotify Liked Songs', liked, null);
++        tick('Liked Songs');
++      });
++
++      for (final w in playlists) {
++        jobs.add(() async {
++          final data = w['data'] as Map;
++          final uri = '${w['_uri'] ?? ''}';
++          final id = uri.split(':').last;
++          final name = '${data['name'] ?? 'Playlist'}';
++          if (id.isEmpty) return tick(name);
++          String? cover;
++          try {
++            cover = data['images']?['items']?[0]?['sources']?[0]?['url'];
++          } catch (_) {}
++          final tracks = await _playlistTracks(id);
++          await _importTrackList('LIBSP_$id', name, tracks, cover);
++          tick(name);
++        });
++      }
++
++      for (final w in albums) {
++        jobs.add(() async {
++          final d = w['data'] as Map;
++          final name = '${d['name'] ?? ''}';
++          final artist = ((d['artists']?['items'] as List?) ?? []).isNotEmpty
++              ? '${d['artists']['items'][0]['profile']?['name'] ?? ''}'
++              : '';
++          if (name.isNotEmpty) await _importAlbum(name, artist);
++          tick(name);
++        });
++      }
++
++      for (final w in artists) {
++        jobs.add(() async {
++          final d = w['data'] as Map;
++          final name = '${d['profile']?['name'] ?? d['name'] ?? ''}';
++          if (name.isNotEmpty) await _importArtist(name);
++          tick(name);
++        });
++      }
++
++      final queue = List.of(jobs);
++      await Future.wait(List.generate(4, (_) async {
++        while (queue.isNotEmpty) {
++          final job = queue.removeAt(0);
++          try {
++            await job();
++          } catch (e) {
++            printERROR('Spotify import step failed: $e');
++            done++;
++          }
++        }
++      }));
++
++      _refreshControllers();
++      status.value = 'Done';
++      return null;
++    } on SpotifyException catch (e) {
++      return e.message;
++    } on DioException catch (e) {
++      return 'Network error: ${e.message}';
++    } finally {
++      isImporting.value = false;
++    }
++  }
++
++  Future<void> _importTrackList(
++      String playlistId, String title, List<Map> tracks, String? cover) async {
++    final matched = <MediaItem>[];
++    final matchBox = await Hive.openBox('SpotifyMatches');
++    for (final t in tracks) {
++      if (t['id'] == '' || t['local'] == true) continue;
++      final cached = matchBox.get(t['id']);
++      if (cached != null) {
++        matched.add(MediaItemBuilder.fromJson(cached));
++        continue;
++      }
++      final item = await _matchTrack(t);
++      if (item != null) {
++        matchBox.put(t['id'], MediaItemBuilder.toJson(item));
++        matched.add(item);
++      }
++    }
++    if (matched.isEmpty && tracks.isNotEmpty) return;
++
++    final listBox = await Hive.openBox(playlistId);
++    await listBox.clear();
++    for (final m in matched) {
++      await listBox.add(MediaItemBuilder.toJson(m));
++    }
++    await listBox.close();
++
++    final plBox = await Hive.openBox('LibraryPlaylists');
++    await plBox.put(
++        playlistId,
++        Playlist(
++                title: title,
++                playlistId: playlistId,
++                description: 'Spotify',
++                thumbnailUrl: cover ??
++                    (matched.isNotEmpty
++                        ? matched.first.artUri.toString()
++                        : Playlist.thumbPlaceholderUrl),
++                isCloudPlaylist: false)
++            .toJson());
++    await plBox.close();
++  }
++
++  Future<MediaItem?> _matchTrack(Map t) async {
++    final artist = (t['artists'] as List).isNotEmpty ? t['artists'][0] : '';
++    final query = '${t['name']} $artist';
++    final spDuration = ((t['durationMs'] ?? 0) as int) ~/ 1000;
++    try {
++      final res = await Get.find<MusicServices>()
++          .search(query, filter: 'songs', limit: 5);
++      final list = _firstList(res).whereType<MediaItem>().toList();
++      if (list.isEmpty) return null;
++      if (spDuration > 0) {
++        for (final c in list) {
++          final d = c.duration?.inSeconds;
++          if (d != null && (d - spDuration).abs() <= 5) return c;
++        }
++      }
++      return list.first;
++    } catch (_) {
++      return null;
++    }
++  }
++
++  Future<void> _importAlbum(String name, String artist) async {
++    final res = await Get.find<MusicServices>()
++        .search('$name $artist', filter: 'albums', limit: 3);
++    final album = _firstList(res).whereType<Album>().firstOrNull;
++    if (album == null) return;
++    final box = await Hive.openBox('LibraryAlbums');
++    await box.put(album.browseId, album.toJson());
++    await box.close();
++  }
++
++  Future<void> _importArtist(String name) async {
++    final res = await Get.find<MusicServices>()
++        .search(name, filter: 'artists', limit: 3);
++    final list = _firstList(res).whereType<Artist>().toList();
++    if (list.isEmpty) return;
++    final exact = list.firstWhere(
++        (a) => a.name.toLowerCase() == name.toLowerCase(),
++        orElse: () => list.first);
++    final box = await Hive.openBox('LibraryArtists');
++    await box.put(exact.browseId, exact.toJson());
++    await box.close();
++  }
++
++  List _firstList(Map<String, dynamic> res) {
++    for (final e in res.entries) {
++      if (e.key != 'params' && e.key != 'searchEndpoint' && e.value is List) {
++        return e.value as List;
++      }
++    }
++    return [];
++  }
++
++  void _refreshControllers() {
++    if (Get.isRegistered<LibraryPlaylistsController>()) {
++      Get.find<LibraryPlaylistsController>().refreshLib();
++    }
++    if (Get.isRegistered<LibraryAlbumsController>()) {
++      Get.find<LibraryAlbumsController>().refreshLib();
++    }
++    if (Get.isRegistered<LibraryArtistsController>()) {
++      Get.find<LibraryArtistsController>().refreshLib();
++    }
++  }
++}
+diff --git a/lib/ui/home.dart b/lib/ui/home.dart
+index 8e831a8..3a732c1 100644
+--- a/lib/ui/home.dart
++++ b/lib/ui/home.dart
+@@ -15,6 +15,7 @@ import 'widgets/bottom_nav_bar.dart';
+ import 'widgets/scroll_to_hide.dart';
+ import 'widgets/sliding_up_panel.dart';
+ import 'widgets/snackbar.dart';
++import 'widgets/spotify_login_dialog.dart';
+ import 'widgets/up_next_queue.dart';
+ 
+ class Home extends StatelessWidget {
+@@ -23,6 +24,7 @@ class Home extends StatelessWidget {
+   @override
+   Widget build(BuildContext context) {
+     printINFO("Home");
++    SpotifyLoginDialog.showIfNeeded(context);
+     final PlayerController playerController = Get.find<PlayerController>();
+     final settingsScreenController = Get.find<SettingsScreenController>();
+     final homeScreenController = Get.find<HomeScreenController>();
+diff --git a/lib/ui/player/components/mini_player.dart b/lib/ui/player/components/mini_player.dart
+index 36b042e..71a8694 100644
+--- a/lib/ui/player/components/mini_player.dart
++++ b/lib/ui/player/components/mini_player.dart
+@@ -14,6 +14,7 @@ import '../../widgets/song_download_btn.dart';
+ import '../../widgets/image_widget.dart';
+ import '../../widgets/mini_player_progress_bar.dart';
+ import 'animated_play_button.dart';
++import 'spotify_mini_player.dart';
+ 
+ class MiniPlayer extends StatelessWidget {
+   const MiniPlayer({super.key});
+@@ -24,6 +25,10 @@ class MiniPlayer extends StatelessWidget {
+     final size = MediaQuery.of(context).size;
+     final isWideScreen = size.width > 800;
+     final bottomNavEnabled = Get.find<SettingsScreenController>().isBottomNavBarEnabled.isTrue;
++    // Phones / bottom-nav layout: Spotify-style card.
++    if (!(isWideScreen && !bottomNavEnabled)) {
++      return const SpotifyMiniPlayer();
++    }
+     return Obx(() {
+       return Visibility(
+         visible: playerController.isPlayerpanelTopVisible.value,
+diff --git a/lib/ui/player/components/player_control.dart b/lib/ui/player/components/player_control.dart
+index 3c51a6c..8c296d1 100644
+--- a/lib/ui/player/components/player_control.dart
++++ b/lib/ui/player/components/player_control.dart
+@@ -2,11 +2,18 @@ import 'package:audio_video_progress_bar/audio_video_progress_bar.dart';
+ import 'package:flutter/material.dart';
+ import 'package:get/get.dart';
+ import 'package:ionicons/ionicons.dart';
++import 'package:share_plus/share_plus.dart';
+ import 'package:widget_marquee/widget_marquee.dart';
+ 
+ import '/ui/player/components/animated_play_button.dart';
++import '../../widgets/sleep_timer_bottom_sheet.dart';
++import '../../widgets/spotify_style.dart';
+ import '../player_controller.dart';
+ 
++/// Spotify-style now-playing controls:
++/// title / artist + saved check, thin progress bar with times underneath,
++/// shuffle / previous / big white play / next / sleep timer, and a bottom row
++/// with repeat, share and queue.
+ class PlayerControlWidget extends StatelessWidget {
+   const PlayerControlWidget({super.key});
+ 
+@@ -52,12 +59,13 @@ class PlayerControlWidget extends StatelessWidget {
+                                 ? playerController.currentSong.value!.title
+                                 : "NA",
+                             textAlign: TextAlign.start,
+-                            style: Theme.of(context).textTheme.labelMedium!,
++                            style: const TextStyle(
++                                fontSize: 24,
++                                fontWeight: FontWeight.w700,
++                                color: Colors.white),
+                           ),
+                         ),
+-                        const SizedBox(
+-                          height: 5,
+-                        ),
++                        const SizedBox(height: 2),
+                         Marquee(
+                           delay: const Duration(milliseconds: 300),
+                           duration: const Duration(seconds: 10),
+@@ -68,7 +76,8 @@ class PlayerControlWidget extends StatelessWidget {
+                                 : "NA",
+                             textAlign: TextAlign.start,
+                             overflow: TextOverflow.ellipsis,
+-                            style: Theme.of(context).textTheme.labelSmall,
++                            style: const TextStyle(
++                                fontSize: 18, color: spGrey),
+                           ),
+                         )
+                       ],
+@@ -76,88 +85,141 @@ class PlayerControlWidget extends StatelessWidget {
+                   }),
+                 ),
+               ),
+-              SizedBox(
+-                width: 45,
+-                child: IconButton(
+-                    onPressed: playerController.toggleFavourite,
+-                    icon: Obx(() => Icon(
+-                          playerController.isCurrentSongFav.isFalse
+-                              ? Icons.favorite_border
+-                              : Icons.favorite,
+-                          color: Theme.of(context).textTheme.titleMedium!.color,
+-                        ))),
+-              ),
++              Obx(() => SpSavedButton(
++                  saved: playerController.isCurrentSongFav.isTrue,
++                  size: 32,
++                  onTap: playerController.toggleFavourite)),
+             ],
+           ),
+-          const SizedBox(
+-            height: 20,
+-          ),
++          const SizedBox(height: 14),
+           GetX<PlayerController>(builder: (controller) {
+             return ProgressBar(
+-              thumbRadius: 7,
+-              barHeight: 4.5,
+-              baseBarColor: Theme.of(context).sliderTheme.inactiveTrackColor,
+-              bufferedBarColor:
+-                  Theme.of(context).sliderTheme.valueIndicatorColor,
+-              progressBarColor: Theme.of(context).sliderTheme.activeTrackColor,
+-              thumbColor: Theme.of(context).sliderTheme.thumbColor,
+-              timeLabelTextStyle: Theme.of(context)
+-                  .textTheme
+-                  .titleMedium!
+-                  .copyWith(fontSize: 14),
++              timeLabelLocation: TimeLabelLocation.below,
++              thumbRadius: 6,
++              barHeight: 4,
++              thumbGlowRadius: 14,
++              baseBarColor: Colors.white24,
++              bufferedBarColor: Colors.white24,
++              progressBarColor: Colors.white,
++              thumbColor: Colors.white,
++              timeLabelPadding: 4,
++              timeLabelTextStyle: const TextStyle(fontSize: 13, color: spGrey),
+               progress: controller.progressBarStatus.value.current,
+               total: controller.progressBarStatus.value.total,
+               buffered: controller.progressBarStatus.value.buffered,
+               onSeek: controller.seek,
+             );
+           }),
++          const SizedBox(height: 6),
+           Row(
+-            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
++            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+             crossAxisAlignment: CrossAxisAlignment.center,
+             children: [
+-              IconButton(
+-                  onPressed: playerController.toggleShuffleMode,
+-                  icon: Obx(() => Icon(
+-                        Ionicons.shuffle,
+-                        color: playerController.isShuffleModeEnabled.value
+-                            ? Theme.of(context).textTheme.titleLarge!.color
+-                            : Theme.of(context)
+-                                .textTheme
+-                                .titleLarge!
+-                                .color!
+-                                .withOpacity(0.2),
+-                      ))),
++              // Shuffle: green with a dot underneath when on
++              Obx(() {
++                final on = playerController.isShuffleModeEnabled.value;
++                return GestureDetector(
++                  onTap: playerController.toggleShuffleMode,
++                  behavior: HitTestBehavior.opaque,
++                  child: SizedBox(
++                    width: 48,
++                    height: 48,
++                    child: Column(
++                      mainAxisAlignment: MainAxisAlignment.center,
++                      children: [
++                        Icon(Ionicons.shuffle,
++                            size: 26, color: on ? spGreen : Colors.white),
++                        const SizedBox(height: 2),
++                        Container(
++                            width: 4,
++                            height: 4,
++                            decoration: BoxDecoration(
++                                shape: BoxShape.circle,
++                                color: on ? spGreen : Colors.transparent)),
++                      ],
++                    ),
++                  ),
++                );
++              }),
+               _previousButton(playerController, context),
+-              const CircleAvatar(radius: 35, child: AnimatedPlayButton(key: Key("playButton"),)),
++              const CircleAvatar(
++                  radius: 38,
++                  backgroundColor: Colors.white,
++                  child: IconTheme(
++                      data: IconThemeData(color: Colors.black),
++                      child: AnimatedPlayButton(
++                          key: Key("playButton"), iconSize: 44))),
+               _nextButton(playerController, context),
+-              Obx(() {
+-                return IconButton(
+-                    onPressed: playerController.toggleLoopMode,
+-                    icon: Icon(
+-                      Icons.all_inclusive,
++              // Sleep timer
++              Obx(() => IconButton(
++                  iconSize: 28,
++                  onPressed: () {
++                    showModalBottomSheet(
++                      constraints: const BoxConstraints(maxWidth: 500),
++                      shape: const RoundedRectangleBorder(
++                        borderRadius:
++                            BorderRadius.vertical(top: Radius.circular(10.0)),
++                      ),
++                      isScrollControlled: true,
++                      context:
++                          playerController.homeScaffoldkey.currentState!.context,
++                      barrierColor: Colors.transparent.withAlpha(100),
++                      builder: (context) => const SleepTimerBottomSheet(),
++                    );
++                  },
++                  icon: Icon(
++                      playerController.isSleepTimerActive.isTrue
++                          ? Icons.timer
++                          : Icons.timer_outlined,
++                      color: playerController.isSleepTimerActive.isTrue
++                          ? spGreen
++                          : Colors.white))),
++            ],
++          ),
++          const SizedBox(height: 6),
++          // Bottom row: repeat (in place of Spotify's "devices"), share, queue
++          Row(
++            mainAxisAlignment: MainAxisAlignment.spaceBetween,
++            children: [
++              Obx(() => IconButton(
++                  tooltip: "Repeat",
++                  onPressed: playerController.toggleLoopMode,
++                  icon: Icon(Icons.repeat_rounded,
+                       color: playerController.isLoopModeEnabled.value
+-                          ? Theme.of(context).textTheme.titleLarge!.color
+-                          : Theme.of(context)
+-                              .textTheme
+-                              .titleLarge!
+-                              .color!
+-                              .withOpacity(0.2),
+-                    ));
+-              }),
++                          ? spGreen
++                          : Colors.white))),
++              Row(children: [
++                IconButton(
++                    tooltip: "Share",
++                    onPressed: () {
++                      final song = playerController.currentSong.value;
++                      if (song != null) {
++                        Share.share("https://youtube.com/watch?v=${song.id}");
++                      }
++                    },
++                    icon: const Icon(Icons.share_outlined)),
++                IconButton(
++                    tooltip: "Queue",
++                    onPressed: () {
++                      if (GetPlatform.isDesktop) {
++                        playerController.homeScaffoldkey.currentState!
++                            .openEndDrawer();
++                      } else {
++                        playerController.queuePanelController.open();
++                      }
++                    },
++                    icon: const Icon(Icons.queue_music_rounded)),
++              ]),
+             ],
+           ),
+         ]);
+   }
+ 
+-
+   Widget _previousButton(
+       PlayerController playerController, BuildContext context) {
+     return IconButton(
+-      icon: Icon(
+-        Icons.skip_previous,
+-        color: Theme.of(context).textTheme.titleMedium!.color,
+-      ),
+-      iconSize: 30,
++      icon: const Icon(Icons.skip_previous_rounded, color: Colors.white),
++      iconSize: 46,
+       onPressed: playerController.prev,
+     );
+   }
+@@ -171,13 +233,9 @@ Widget _nextButton(PlayerController playerController, BuildContext context) {
+             (playerController.currentQueue.last.id ==
+                 playerController.currentSong.value?.id));
+     return IconButton(
+-        icon: Icon(
+-          Icons.skip_next,
+-          color: isLastSong
+-              ? Theme.of(context).textTheme.titleLarge!.color!.withOpacity(0.2)
+-              : Theme.of(context).textTheme.titleMedium!.color,
+-        ),
+-        iconSize: 30,
++        icon: Icon(Icons.skip_next_rounded,
++            color: isLastSong ? Colors.white24 : Colors.white),
++        iconSize: 46,
+         onPressed: isLastSong ? null : playerController.next);
+   });
+ }
+diff --git a/lib/ui/player/components/spotify_mini_player.dart b/lib/ui/player/components/spotify_mini_player.dart
+new file mode 100644
+index 0000000..0b203dd
+--- /dev/null
++++ b/lib/ui/player/components/spotify_mini_player.dart
+@@ -0,0 +1,116 @@
++import 'package:flutter/material.dart';
++import 'package:get/get.dart';
++
++import '/ui/player/player_controller.dart';
++import '../../widgets/image_widget.dart';
++import '../../widgets/mini_player_progress_bar.dart';
++import '../../widgets/spotify_style.dart';
++import 'animated_play_button.dart';
++
++/// Spotify-style mini player: a rounded card tinted with the album colour,
++/// thumbnail, title / artist, devices icon, "saved" check, play button and a
++/// thin progress line along the bottom edge.
++class SpotifyMiniPlayer extends StatelessWidget {
++  const SpotifyMiniPlayer({super.key});
++
++  @override
++  Widget build(BuildContext context) {
++    final playerController = Get.find<PlayerController>();
++    final width = MediaQuery.of(context).size.width;
++    return Obx(() {
++      final song = playerController.currentSong.value;
++      final tint = spThemeTint(lightness: 0.3);
++      return Visibility(
++        visible: playerController.isPlayerpanelTopVisible.value,
++        child: AnimatedOpacity(
++          opacity: playerController.playerPaneOpacity.value,
++          duration: Duration.zero,
++          child: SizedBox(
++            height: playerController.playerPanelMinHeight.value,
++            width: width,
++            child: Padding(
++              padding: const EdgeInsets.fromLTRB(8, 6, 8, 6),
++              child: Container(
++                decoration: BoxDecoration(
++                    color: tint, borderRadius: BorderRadius.circular(8)),
++                clipBehavior: Clip.antiAlias,
++                child: Column(
++                  children: [
++                    Expanded(
++                      child: Padding(
++                        padding: const EdgeInsets.only(left: 8, right: 4),
++                        child: Row(
++                          children: [
++                            ClipRRect(
++                                borderRadius: BorderRadius.circular(4),
++                                child: song != null
++                                    ? ImageWidget(size: 42, song: song)
++                                    : const SizedBox(width: 42, height: 42)),
++                            const SizedBox(width: 10),
++                            Expanded(
++                              child: GestureDetector(
++                                behavior: HitTestBehavior.opaque,
++                                onHorizontalDragEnd: (d) {
++                                  if (d.primaryVelocity! < 0) {
++                                    playerController.next();
++                                  } else if (d.primaryVelocity! > 0) {
++                                    playerController.prev();
++                                  }
++                                },
++                                onTap: playerController.playerPanelController.open,
++                                child: Column(
++                                  mainAxisAlignment: MainAxisAlignment.center,
++                                  crossAxisAlignment: CrossAxisAlignment.start,
++                                  children: [
++                                    Text(song?.title ?? '',
++                                        maxLines: 1,
++                                        overflow: TextOverflow.ellipsis,
++                                        style: const TextStyle(
++                                            fontSize: 14,
++                                            fontWeight: FontWeight.w700,
++                                            color: Colors.white)),
++                                    Text(song?.artist ?? '',
++                                        maxLines: 1,
++                                        overflow: TextOverflow.ellipsis,
++                                        style: const TextStyle(
++                                            fontSize: 13,
++                                            color: Colors.white70)),
++                                  ],
++                                ),
++                              ),
++                            ),
++                            const Icon(Icons.speaker_group_outlined,
++                                color: Colors.white, size: 24),
++                            Obx(() => SpSavedButton(
++                                saved: playerController.isCurrentSongFav.isTrue,
++                                size: 24,
++                                onTap: playerController.toggleFavourite)),
++                            const SizedBox(
++                                width: 40,
++                                child: Center(
++                                    child: AnimatedPlayButton(iconSize: 30))),
++                          ],
++                        ),
++                      ),
++                    ),
++                    GetX<PlayerController>(
++                      builder: (controller) => Container(
++                          height: 2,
++                          margin: const EdgeInsets.symmetric(horizontal: 8),
++                          color: Colors.white24,
++                          child: MiniPlayerProgressBar(
++                              progressBarStatus:
++                                  controller.progressBarStatus.value,
++                              progressBarColor: Colors.white)),
++                    ),
++                    const SizedBox(height: 2),
++                  ],
++                ),
++              ),
++            ),
++          ),
++        ),
++      );
++    });
++  }
++}
+diff --git a/lib/ui/player/components/standard_player.dart b/lib/ui/player/components/standard_player.dart
+index 35290b2..2815864 100644
+--- a/lib/ui/player/components/standard_player.dart
++++ b/lib/ui/player/components/standard_player.dart
+@@ -1,13 +1,10 @@
+-import 'dart:ui';
+-
+-
+ import 'package:flutter/material.dart';
+ import 'package:get/get.dart';
+ 
+ import '../../widgets/songinfo_bottom_sheet.dart';
++import '../../widgets/spotify_style.dart';
+ import '../player_controller.dart';
+ import 'albumart_lyrics.dart';
+-import 'backgroud_image.dart';
+ import 'lyrics_switch.dart';
+ import 'player_control.dart';
+ 
+@@ -29,57 +26,25 @@ class StandardPlayer extends StatelessWidget {
+         size.width - 60; //((size.height < 750) ? 90 : 60);
+     //playerArtImageSize = playerArtImageSize > 350 ? 350 : playerArtImageSize;
+     final spaceAvailableForArtImage =
+-        size.height - (70 + Get.mediaQuery.padding.bottom + 330);
++        size.height - (70 + Get.mediaQuery.padding.bottom + 390);
+     playerArtImageSize = playerArtImageSize > spaceAvailableForArtImage
+         ? spaceAvailableForArtImage
+         : playerArtImageSize;
+     return Stack(
+       children: [
+         /// Stack first child
+-        /// Album art image in background covering the whole screen
+-        BackgroudImage(
+-          key: Key("${playerController.currentSong.value?.id}_background"),
+-          cacheHeight: 200,
+-        ),
+-
+-        /// Stack child
+-        /// Blur effect on background
+-        BackdropFilter(
+-          filter: ImageFilter.blur(sigmaX: 10.0, sigmaY: 10.0),
+-          child: Stack(
+-            children: [
+-              /// opacity effect on background
+-              Positioned.fill(
+-                child: Container(
+-                  decoration: BoxDecoration(
+-                    color: Theme.of(context).primaryColor.withOpacity(0.8),
++        /// Spotify-style background: album colour fading into near-black
++        Positioned.fill(
++          child: Obx(() => DecoratedBox(
++                decoration: BoxDecoration(
++                  gradient: LinearGradient(
++                    begin: Alignment.topCenter,
++                    end: Alignment.bottomCenter,
++                    colors: [spThemeTint(lightness: 0.36), spBg],
++                    stops: const [0, 0.78],
+                   ),
+                 ),
+-              ),
+-
+-              /// used to hide queue header when player is minimized
+-              /// gradient to used here
+-              Align(
+-                alignment: Alignment.bottomCenter,
+-                child: Container(
+-                  height: 65 + Get.mediaQuery.padding.bottom + 120,
+-                  decoration: BoxDecoration(
+-                    gradient: LinearGradient(
+-                      colors: [
+-                        Theme.of(context).primaryColor,
+-                        Theme.of(context).primaryColor,
+-                        Theme.of(context).primaryColor.withOpacity(0.4),
+-                        Theme.of(context).primaryColor.withOpacity(0),
+-                      ],
+-                      begin: Alignment.bottomCenter,
+-                      end: Alignment.topCenter,
+-                      stops: const [0, 0.5, 0.8, 1],
+-                    ),
+-                  ),
+-                ),
+-              ),
+-            ],
+-          ),
++              )),
+         ),
+ 
+         /// Stack child
+@@ -190,15 +155,19 @@ class StandardPlayer extends StatelessWidget {
+                     child: Obx(
+                       () => Column(
+                         children: [
+-                          Text(playerController.playinfrom.value.typeString,
++                          Text(
++                              "${playerController.playinfrom.value.typeString}"
++                                  .toUpperCase(),
+                               style: const TextStyle(
+-                                  fontSize: 12, fontWeight: FontWeight.bold)),
++                                  fontSize: 12,
++                                  letterSpacing: 0.8,
++                                  fontWeight: FontWeight.w400)),
+                           Obx(
+                             () => Text(
+-                              "\"${playerController.playinfrom.value.nameString}\"",
++                              playerController.playinfrom.value.nameString,
+                               overflow: TextOverflow.ellipsis,
+-                              style:
+-                                  const TextStyle(fontWeight: FontWeight.bold),
++                              style: const TextStyle(
++                                  fontSize: 15, fontWeight: FontWeight.w700),
+                             ),
+                           )
+                         ],
+diff --git a/lib/ui/player/player.dart b/lib/ui/player/player.dart
+index a06160e..ddd6802 100644
+--- a/lib/ui/player/player.dart
++++ b/lib/ui/player/player.dart
+@@ -8,6 +8,7 @@ import '/ui/player/components/standard_player.dart';
+ import '/ui/screens/Settings/settings_screen_controller.dart';
+ import '../../utils/helper.dart';
+ import '../widgets/snackbar.dart';
++import '../widgets/spotify_style.dart';
+ import '../widgets/up_next_queue.dart';
+ import '/ui/player/player_controller.dart';
+ import '../widgets/sliding_up_panel.dart';
+@@ -42,31 +43,28 @@ class Player extends StatelessWidget {
+ 
+           /// this is the header of the collapsed panel
+           /// contains the button ^ to open the queue panel
+-          collapsed: InkWell(
+-            onTap: () {
+-              /// queue open in end drawer in desktop
+-              if (GetPlatform.isDesktop) {
+-                playerController.homeScaffoldkey.currentState!.openEndDrawer();
+-              } else {
+-                playerController.queuePanelController.open();
+-              }
+-            },
+-            child: Container(
+-                color: Theme.of(context).primaryColor,
+-                child: Column(
+-                  children: [
+-                    SizedBox(
+-                      height: 65,
+-                      child: Center(
+-                          child: Icon(
+-                        color: Theme.of(context).textTheme.titleMedium!.color,
+-                        Icons.keyboard_arrow_up,
+-                        size: 40,
+-                      )),
+-                    ),
+-                  ],
+-                )),
+-          ),
++          collapsed: Obx(() => GestureDetector(
++                /// Spotify's "Lyrics preview" card; tapping it toggles lyrics.
++                onTap: playerController.showLyrics,
++                child: Container(
++                  margin: const EdgeInsets.symmetric(horizontal: 14),
++                  padding: const EdgeInsets.fromLTRB(20, 18, 20, 0),
++                  alignment: Alignment.topLeft,
++                  decoration: BoxDecoration(
++                    color: spThemeTint(lightness: 0.3),
++                    borderRadius:
++                        const BorderRadius.vertical(top: Radius.circular(14)),
++                  ),
++                  child: Text(
++                      playerController.showLyricsflag.value
++                          ? "Hide lyrics"
++                          : "Lyrics preview",
++                      style: const TextStyle(
++                          fontSize: 17,
++                          fontWeight: FontWeight.w700,
++                          color: Colors.white)),
++                ),
++              )),
+ 
+           /// Panel for queue
+           panelBuilder: (ScrollController sc, onReorderStart, onReorderEnd) {
+diff --git a/lib/ui/screens/Home/home_screen.dart b/lib/ui/screens/Home/home_screen.dart
+index 5ce49ff..06f55b8 100644
+--- a/lib/ui/screens/Home/home_screen.dart
++++ b/lib/ui/screens/Home/home_screen.dart
+@@ -16,6 +16,7 @@ import '../../widgets/content_list_widget.dart';
+ import '../../widgets/quickpickswidget.dart';
+ import '../../widgets/shimmer_widgets/home_shimmer.dart';
+ import 'home_screen_controller.dart';
++import '../../widgets/spotify_home_header.dart';
+ import '../Settings/settings_screen.dart';
+ 
+ class HomeScreen extends StatelessWidget {
+@@ -207,12 +208,7 @@ class Body extends StatelessWidget {
+                                 //           homeScreenController.quickPicks.value,
+                                 //       scrollController: scrollController);
+                                 // }),
+-                                Container(
+-                                  padding: const EdgeInsets.fromLTRB(0, 8, 0, 16),
+-                                  child: const Text(
+-                                    "Harmony Music",
+-                                    style: TextStyle(color: Colors.white, fontSize: 28, fontWeight: FontWeight.bold),)
+-                                ),
++                                const SpotifyHomeHeader(),
+                                 ...getWidgetList(
+                                     homeScreenController.middleContent,
+                                     homeScreenController),
+diff --git a/lib/ui/screens/Library/library_combined.dart b/lib/ui/screens/Library/library_combined.dart
+index 88f9ba8..c604f78 100644
+--- a/lib/ui/screens/Library/library_combined.dart
++++ b/lib/ui/screens/Library/library_combined.dart
+@@ -1,101 +1,218 @@
+ import 'package:flutter/material.dart';
+ import 'package:get/get.dart';
+ 
+-import '/ui/screens/Settings/settings_screen_controller.dart';
+-import '/ui/widgets/piped_sync_widget.dart';
+ import '../../widgets/create_playlist_dialog.dart';
+ import 'library.dart';
++import '../../widgets/spotify_style.dart';
+ 
+ class CombinedLibrary extends StatelessWidget {
+   const CombinedLibrary({super.key});
+ 
++  static const _filters = [
++    'Playlists',
++    'Podcasts',
++    'Albums',
++    'Artists',
++    'Downloaded'
++  ];
++
+   @override
+   Widget build(BuildContext context) {
+     final tabCon = Get.put(CombinedLibraryController());
+-    final settingscrnController = Get.find<SettingsScreenController>();
+-
+     return Scaffold(
+-      appBar: AppBar(
+-        toolbarHeight: 85,
+-        backgroundColor: Theme.of(context).canvasColor,
+-        elevation: 0,
+-        actions: [
+-          Obx(() => (settingscrnController.isLinkedWithPiped.isTrue)
+-              ? const PipedSyncWidget(
+-                  padding: EdgeInsets.only(right: 10, top: 50))
+-              : const SizedBox.shrink()),
+-          Padding(
+-            padding: const EdgeInsets.only(top: 50.0, right: 25),
+-            child: SizedBox(
+-              height: 40,
+-              width: 50,
+-              child: FittedBox(
+-                child: FloatingActionButton.extended(
+-                    elevation: 0,
+-                    onPressed: () {
+-                      showDialog(
+-                          context: context,
+-                          builder: (context) =>
+-                              const CreateNRenamePlaylistPopup());
++      backgroundColor: spBg,
++      body: SafeArea(
++        bottom: false,
++        child: Column(
++          crossAxisAlignment: CrossAxisAlignment.start,
++          children: [
++            // Header: avatar, title, search, create
++            Padding(
++              padding: const EdgeInsets.fromLTRB(16, 12, 8, 4),
++              child: Row(children: [
++                const SpAvatar(size: 36),
++                const SizedBox(width: 14),
++                const Text('Your Library',
++                    style:
++                        TextStyle(fontSize: 26, fontWeight: FontWeight.w800)),
++                const Spacer(),
++                IconButton(
++                    icon: const Icon(Icons.search, size: 30),
++                    onPressed: tabCon.toggleSearch),
++                IconButton(
++                    icon: const Icon(Icons.add, size: 32),
++                    onPressed: () => showDialog(
++                        context: context,
++                        builder: (context) =>
++                            const CreateNRenamePlaylistPopup())),
++              ]),
++            ),
++            // Inline "find in library" field (toggled by the search icon)
++            Obx(() => tabCon.searching.value
++                ? Padding(
++                    padding: const EdgeInsets.fromLTRB(16, 4, 16, 4),
++                    child: TextField(
++                      autofocus: true,
++                      onChanged: (v) => tabCon.query.value = v.toLowerCase(),
++                      decoration: InputDecoration(
++                          isDense: true,
++                          filled: true,
++                          fillColor: spSurface,
++                          hintText: 'Search in Your Library',
++                          prefixIcon: const Icon(Icons.search, size: 22),
++                          border: OutlineInputBorder(
++                              borderRadius: BorderRadius.circular(6),
++                              borderSide: BorderSide.none)),
++                    ),
++                  )
++                : const SizedBox.shrink()),
++            // Filter chips
++            SingleChildScrollView(
++              scrollDirection: Axis.horizontal,
++              padding: const EdgeInsets.fromLTRB(16, 8, 8, 8),
++              child: Obx(() => Row(children: [
++                    for (final f in _filters)
++                      SpChip(f,
++                          selected: tabCon.filter.value == f,
++                          onTap: () => tabCon.filter.value =
++                              tabCon.filter.value == f ? '' : f),
++                  ])),
++            ),
++            // Sort row + list/grid toggle
++            Padding(
++              padding: const EdgeInsets.fromLTRB(16, 4, 12, 6),
++              child: Row(children: [
++                const Icon(Icons.swap_vert, size: 20),
++                const SizedBox(width: 8),
++                const Text('Recents',
++                    style:
++                        TextStyle(fontWeight: FontWeight.w600, fontSize: 14)),
++                const Spacer(),
++                Obx(() => IconButton(
++                    visualDensity: VisualDensity.compact,
++                    icon: Icon(
++                        tabCon.isGrid.value
++                            ? Icons.view_list_rounded
++                            : Icons.grid_view_rounded,
++                        size: 22),
++                    onPressed: () => tabCon.isGrid.toggle())),
++              ]),
++            ),
++            Expanded(
++              child: Obx(() {
++                final filter = tabCon.filter.value;
++                if (filter == 'Downloaded') {
++                  return const SongsLibraryWidget(isBottomNavActive: true);
++                }
++                if (filter == 'Podcasts') {
++                  return const Center(
++                      child: Text('No podcasts yet',
++                          style: TextStyle(color: spGrey, fontSize: 15)));
++                }
++                final q = tabCon.query.value;
++                final entries = buildLibraryEntries().where((e) {
++                  if (q.isNotEmpty && !e.title.toLowerCase().contains(q)) {
++                    return false;
++                  }
++                  switch (filter) {
++                    case 'Playlists':
++                      return e.kind == 'playlist';
++                    case 'Albums':
++                      return e.kind == 'album';
++                    case 'Artists':
++                      return e.kind == 'artist';
++                  }
++                  return true;
++                }).toList();
++                if (tabCon.isGrid.value) {
++                  return GridView.builder(
++                    padding: const EdgeInsets.fromLTRB(16, 4, 16, 160),
++                    gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
++                        crossAxisCount: 3,
++                        mainAxisSpacing: 14,
++                        crossAxisSpacing: 12,
++                        mainAxisExtent: 168),
++                    itemCount: entries.length,
++                    itemBuilder: (context, i) {
++                      final e = entries[i];
++                      return InkWell(
++                        onTap: e.open,
++                        child: Column(
++                            crossAxisAlignment: CrossAxisAlignment.start,
++                            children: [
++                              LayoutBuilder(
++                                  builder: (c, box) => e.thumb(box.maxWidth)),
++                              const SizedBox(height: 6),
++                              Text(e.title,
++                                  maxLines: 1,
++                                  overflow: TextOverflow.ellipsis,
++                                  style: const TextStyle(
++                                      fontSize: 13,
++                                      fontWeight: FontWeight.w600)),
++                              Text(e.subtitle,
++                                  maxLines: 1,
++                                  overflow: TextOverflow.ellipsis,
++                                  style: const TextStyle(
++                                      fontSize: 12, color: spGrey)),
++                            ]),
++                      );
+                     },
+-                    label: const Row(
+-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+-                      children: [
+-                        Icon(
+-                          Icons.add,
+-                        ),
+-                      ],
+-                    )),
+-              ),
++                  );
++                }
++                return ListView.builder(
++                  padding: const EdgeInsets.only(bottom: 160, top: 4),
++                  itemCount: entries.length,
++                  itemBuilder: (context, i) {
++                    final e = entries[i];
++                    return InkWell(
++                      onTap: e.open,
++                      child: Padding(
++                        padding: const EdgeInsets.symmetric(
++                            horizontal: 16, vertical: 8),
++                        child: Row(children: [
++                          e.thumb(64),
++                          const SizedBox(width: 14),
++                          Expanded(
++                            child: Column(
++                              crossAxisAlignment: CrossAxisAlignment.start,
++                              children: [
++                                Text(e.title,
++                                    maxLines: 1,
++                                    overflow: TextOverflow.ellipsis,
++                                    style: const TextStyle(
++                                        fontSize: 17,
++                                        fontWeight: FontWeight.w500)),
++                                const SizedBox(height: 3),
++                                Text(e.subtitle,
++                                    maxLines: 1,
++                                    overflow: TextOverflow.ellipsis,
++                                    style: const TextStyle(
++                                        fontSize: 14, color: spGrey)),
++                              ],
++                            ),
++                          ),
++                        ]),
++                      ),
++                    );
++                  },
++                );
++              }),
+             ),
+-          ),
+-        ],
+-        bottom: TabBar(
+-          isScrollable: true,
+-          splashFactory: NoSplash.splashFactory,
+-          controller: tabCon.tabController,
+-          tabs: [
+-            Tab(text: "songs".tr),
+-            Tab(text: "playlists".tr),
+-            Tab(text: "albums".tr),
+-            Tab(text: "artists".tr),
+           ],
+         ),
+-        title: Padding(
+-          padding: const EdgeInsets.only(top: 60.0, left: 5),
+-          child:
+-              Text('library'.tr, style: Theme.of(context).textTheme.titleLarge),
+-        ),
+-      ),
+-      body: TabBarView(
+-        controller: tabCon.tabController,
+-        children: const [
+-          SongsLibraryWidget(
+-            isBottomNavActive: true,
+-          ),
+-          PlaylistNAlbumLibraryWidget(
+-              isAlbumContent: false, isBottomNavActive: true),
+-          PlaylistNAlbumLibraryWidget(isBottomNavActive: true),
+-          LibraryArtistWidget(isBottomNavActive: true),
+-        ],
+       ),
+     );
+   }
+ }
+ 
+-class CombinedLibraryController extends GetxController
+-    with GetSingleTickerProviderStateMixin {
+-  late TabController tabController;
++class CombinedLibraryController extends GetxController {
++  final filter = ''.obs;
++  final isGrid = false.obs;
++  final searching = false.obs;
++  final query = ''.obs;
+ 
+-  @override
+-  void onInit() {
+-    super.onInit();
+-    tabController = TabController(vsync: this, length: 4);
+-  }
+-
+-  @override
+-  void onClose() {
+-    tabController.dispose();
+-    super.onClose();
++  void toggleSearch() {
++    searching.toggle();
++    if (!searching.value) query.value = '';
+   }
+ }
+diff --git a/lib/ui/screens/Playlist/playlist_screen.dart b/lib/ui/screens/Playlist/playlist_screen.dart
+index ddb7353..9dd8806 100644
+--- a/lib/ui/screens/Playlist/playlist_screen.dart
++++ b/lib/ui/screens/Playlist/playlist_screen.dart
+@@ -18,6 +18,9 @@ import '../../widgets/snackbar.dart';
+ import '../../widgets/song_list_tile.dart';
+ import '../../widgets/songinfo_bottom_sheet.dart';
+ import '../../widgets/sort_widget.dart';
++import '../../widgets/spotify_playlist_widgets.dart';
++import '../../widgets/spotify_style.dart';
++import '../Home/home_screen_controller.dart';
+ import '../Library/library_controller.dart';
+ import 'playlist_screen_controller.dart';
+ 
+@@ -53,59 +56,17 @@ class PlaylistScreen extends StatelessWidget {
+         },
+         child: Stack(
+           children: [
+-            Obx(
+-              () => playlistController.isContentFetched.isTrue
+-                  ? Positioned(
+-                      top: landscape
+-                          ? 0
+-                          : -.25 * playlistController.scrollOffset.value,
+-                      right: landscape ? 0 : null,
+-                      child: Obx(() {
+-                        final opacityValue = 1 -
+-                            playlistController.scrollOffset.value /
+-                                (size.width - 100);
+-                        return Opacity(
+-                          opacity: opacityValue < 0 ||
+-                                  playlistController.isSearchingOn.isTrue && !landscape
+-                              ? 0
+-                              : opacityValue,
+-                          child: DecoratedBox(
+-                            position: DecorationPosition.foreground,
+-                            decoration: BoxDecoration(
+-                              boxShadow: [
+-                                BoxShadow(
+-                                  color: Theme.of(context).canvasColor,
+-                                  spreadRadius: 200,
+-                                  blurRadius: 100,
+-                                  offset: Offset(-size.height, 0),
+-                                ),
+-                                BoxShadow(
+-                                  color: Theme.of(context).canvasColor,
+-                                  spreadRadius: 200,
+-                                  blurRadius: 100,
+-                                  offset: Offset(
+-                                      0,
+-                                      landscape
+-                                          ? size.height
+-                                          : size.width + 80),
+-                                )
+-                              ],
+-                            ),
+-                            child: CachedNetworkImage(
+-                              imageUrl: Thumbnail(playlistController
+-                                      .playlist.value.thumbnailUrl)
+-                                  .extraHigh,
+-                              fit: landscape ? BoxFit.fitHeight : BoxFit.cover,
+-                              width: landscape ? null : size.width,
+-                              height: landscape ? size.height : size.width,
+-                            ),
+-                          ),
+-                        );
+-                      }))
+-                  : SizedBox(
+-                      height: size.width,
+-                      width: size.width,
+-                    ),
++            Positioned.fill(
++              child: DecoratedBox(
++                decoration: BoxDecoration(
++                  gradient: LinearGradient(
++                    begin: Alignment.topCenter,
++                    end: Alignment.bottomCenter,
++                    colors: [Color(0xFF5A5A5A), spBg],
++                    stops: [0, 0.55],
++                  ),
++                ),
++              ),
+             ),
+             Column(
+               children: [
+@@ -238,11 +199,7 @@ class PlaylistScreen extends StatelessWidget {
+                           child: ListView.builder(
+                             addRepaintBoundaries: false,
+                             padding: EdgeInsets.only(
+-                              top: playlistController.isSearchingOn.isTrue
+-                                  ? 0
+-                                  : landscape
+-                                      ? 150
+-                                      : 200,
++                              top: 0,
+                               bottom: 200,
+                             ),
+                             itemCount: playlistController.songList.isEmpty ||
+@@ -251,141 +208,73 @@ class PlaylistScreen extends StatelessWidget {
+                                 : playlistController.songList.length + 3,
+                             itemBuilder: (_, index) {
+                               if (index == 0) {
+-                                return Padding(
+-                                  padding: const EdgeInsets.only(left: 15.0),
+-                                  child: SizedBox(
+-                                    height: 40,
+-                                    child: SingleChildScrollView(
+-                                      scrollDirection: Axis.horizontal,
++                                final pl = playlistController.playlist.value;
++                                return Column(
++                                  crossAxisAlignment: CrossAxisAlignment.start,
++                                  children: [
++                                    SpFindOnPage(
++                                      onStart: () => playlistController
++                                          .onSearchStart(pl.playlistId),
++                                      onSearch: (v) => playlistController
++                                          .onSearch(v, pl.playlistId),
++                                      onClose: () => playlistController
++                                          .onSearchClose(pl.playlistId),
++                                    ),
++                                    SpPlaylistHeader(
++                                      title: pl.title,
++                                      description: pl.description,
++                                      thumbnailUrl: pl.thumbnailUrl,
++                                      owner: pl.isCloudPlaylist
++                                          ? 'YouTube Music'
++                                          : 'You',
++                                      songs: playlistController.songList
++                                          .toList(),
++                                    ),
++                                  ],
++                                );
++                              } else if (index == 1) {
++                                final pl = playlistController.playlist.value;
++                                final isLocal = !pl.isCloudPlaylist &&
++                                    playlistController.isDefaultPlaylist.isFalse;
++                                return Column(
++                                  crossAxisAlignment: CrossAxisAlignment.start,
++                                  children: [
++                                    // Action row: cover thumb, download, share, more ... shuffle, play
++                                    Padding(
++                                      padding: const EdgeInsets.fromLTRB(
++                                          16, 0, 16, 10),
+                                       child: Row(
+                                         children: [
+-                                          // Bookmark button
+-                                          Obx(() => (playlistController.playlist
+-                                                      .value.isPipedPlaylist ||
+-                                                  !playlistController.playlist
+-                                                      .value.isCloudPlaylist)
+-                                              ? const SizedBox.shrink()
+-                                              : IconButton(
+-                                                  tooltip: playlistController
+-                                                          .isAddedToLibrary
+-                                                          .isFalse
+-                                                      ? "addToLibrary".tr
+-                                                      : "removeFromLibrary".tr,
+-                                                  splashRadius: 10,
+-                                                  onPressed: () {
+-                                                    final add = playlistController
+-                                                        .isAddedToLibrary.isFalse;
+-                                                    playlistController
+-                                                        .addNremoveFromLibrary(
+-                                                            playlistController
+-                                                                .playlist.value,
+-                                                            add: add)
+-                                                        .then((value) {
+-                                                      if (!context.mounted) {
+-                                                        return;
+-                                                      }
+-                                      
+-                                                      ScaffoldMessenger.of(
+-                                                              context)
+-                                                          .showSnackBar(snackbar(
+-                                                              context,
+-                                                              value
+-                                                                  ? add
+-                                                                      ? "playlistBookmarkAddAlert"
+-                                                                          .tr
+-                                                                      : "listBookmarkRemoveAlert"
+-                                                                          .tr
+-                                                                  : "operationFailed"
+-                                                                      .tr,
+-                                                              size: SanckBarSize
+-                                                                  .MEDIUM));
+-                                                    });
+-                                                  },
+-                                                  icon: Icon(playlistController
+-                                                          .isAddedToLibrary
+-                                                          .isFalse
+-                                                      ? Icons.bookmark_add
+-                                                      : Icons.bookmark_added))),
+-                                          // Play button
+-                                          IconButton(
+-                                            tooltip: "play".tr,
+-                                              onPressed: () {
+-                                                playerController.playPlayListSong(
+-                                                    List<MediaItem>.from(
+-                                                        playlistController
+-                                                            .songList),
+-                                                    0,
+-                                                    playfrom: PlaylingFrom(
+-                                                        name: playlistController
+-                                                            .playlist.value.title,
+-                                                        type: PlaylingFromType
+-                                                            .PLAYLIST));
+-                                              },
+-                                              icon: Icon(
+-                                                Icons.play_circle,
+-                                                color: Theme.of(context)
+-                                                    .textTheme
+-                                                    .titleMedium!
+-                                                    .color,
+-                                              )),
+-                                          // Enqueue button
+-                                          IconButton(
+-                                              tooltip: "enqueueSongs".tr,
+-                                              onPressed: () {
+-                                                Get.find<PlayerController>()
+-                                                    .enqueueSongList(
+-                                                        playlistController
+-                                                            .songList
+-                                                            .toList())
+-                                                    .whenComplete(() {
+-                                                  if (context.mounted) {
+-                                                    ScaffoldMessenger.of(context)
+-                                                        .showSnackBar(snackbar(
+-                                                            context,
+-                                                            "songEnqueueAlert".tr,
+-                                                            size: SanckBarSize
+-                                                                .MEDIUM));
+-                                                  }
+-                                                });
+-                                              },
+-                                              icon: Icon(
+-                                                Icons.merge,
+-                                                color: Theme.of(context)
+-                                                    .textTheme
+-                                                    .titleMedium!
+-                                                    .color,
+-                                              )),
+-                                      
+-                                          // Shuffle button
+-                                          IconButton(
+-                                              tooltip: "shuffle".tr,
+-                                              onPressed: () {
+-                                                final songsToplay =
+-                                                    List<MediaItem>.from(
+-                                                        playlistController
+-                                                            .songList);
+-                                                songsToplay.shuffle();
+-                                                songsToplay.shuffle();
+-                                                playerController.playPlayListSong(
+-                                                    songsToplay, 0,
+-                                                    playfrom: PlaylingFrom(
+-                                                        name: playlistController
+-                                                            .playlist.value.title,
+-                                                        type: PlaylingFromType
+-                                                            .PLAYLIST));
+-                                              },
+-                                              icon: Icon(
+-                                                Icons.shuffle,
+-                                                color: Theme.of(context)
+-                                                    .textTheme
+-                                                    .titleMedium!
+-                                                    .color,
+-                                              )),
++                                          ClipRRect(
++                                            borderRadius:
++                                                BorderRadius.circular(4),
++                                            child: Container(
++                                              width: 44,
++                                              height: 44,
++                                              decoration: BoxDecoration(
++                                                  border: Border.all(
++                                                      color: Colors.white54,
++                                                      width: 1.5),
++                                                  borderRadius:
++                                                      BorderRadius.circular(4)),
++                                              child: CachedNetworkImage(
++                                                imageUrl: Thumbnail(
++                                                        pl.thumbnailUrl)
++                                                    .extraHigh,
++                                                fit: BoxFit.cover,
++                                                errorWidget: (_, __, ___) =>
++                                                    const ColoredBox(
++                                                        color: spSurface),
++                                              ),
++                                            ),
++                                          ),
++                                          const SizedBox(width: 6),
+                                           // Download button
+                                           GetX<Downloader>(builder: (controller) {
+                                             final id = playlistController
+                                                 .playlist.value.playlistId;
+                                             return IconButton(
++                                              iconSize: 28,
+                                               tooltip: "downloadPlaylist".tr,
+                                               onPressed: () {
+                                                 if (playlistController
+@@ -450,59 +339,12 @@ class PlaylistScreen extends StatelessWidget {
+                                             );
+                                           }),
+                                       
+-                                          if (playlistController
+-                                              .isAddedToLibrary.isTrue)
+-                                            IconButton(
+-                                                tooltip:
+-                                                    "syncPlaylistSongs".tr,
+-                                                onPressed: () {
+-                                                  playlistController
+-                                                      .syncPlaylistSongs();
+-                                                },
+-                                                icon:
+-                                                    const Icon(Icons.cloud_sync)),
+-                                          if (playlistController
+-                                              .playlist.value.isPipedPlaylist)
++                                          if (pl.isCloudPlaylist)
+                                             IconButton(
+-                                                tooltip:
+-                                                    "blacklistPipedPlaylist".tr,
+-                                                icon: const Icon(
+-                                                  Icons.block,
+-                                                  size: 20,
+-                                                ),
+-                                                splashRadius: 10,
+-                                                onPressed: () {
+-                                                  Get.nestedKey(
+-                                                          ScreenNavigationSetup
+-                                                              .id)!
+-                                                      .currentState!
+-                                                      .pop();
+-                                                  Get.find<
+-                                                          LibraryPlaylistsController>()
+-                                                      .blacklistPipedPlaylist(
+-                                                          playlistController
+-                                                              .playlist.value);
+-                                                  ScaffoldMessenger.of(
+-                                                          Get.context!)
+-                                                      .showSnackBar(snackbar(
+-                                                          Get.context!,
+-                                                          "playlistBlacklistAlert"
+-                                                              .tr,
+-                                                          size: SanckBarSize
+-                                                              .MEDIUM));
+-                                                }),
+-                                          if (playlistController
+-                                              .playlist.value.isCloudPlaylist)
+-                                            IconButton(
+-                                              tooltip:
+-                                                  "sharePlaylist".tr,
+-                                              visualDensity: const VisualDensity(
+-                                                vertical: -3,
+-                                              ),
+-                                              splashRadius: 10,
++                                              iconSize: 26,
++                                              tooltip: "sharePlaylist".tr,
+                                               onPressed: () {
+-                                                final content = playlistController
+-                                                    .playlist.value;
++                                                final content = pl;
+                                                 if (content.isPipedPlaylist) {
+                                                   Share.share(
+                                                       "https://piped.video/playlist?list=${content.playlistId}");
+@@ -513,7 +355,6 @@ class PlaylistScreen extends StatelessWidget {
+                                                           "VL";
+                                                   String url =
+                                                       "https://youtube.com/playlist?list=";
+-                                      
+                                                   url = isPlaylistIdPrefixAvlbl
+                                                       ? url +
+                                                           content.playlistId
+@@ -523,94 +364,92 @@ class PlaylistScreen extends StatelessWidget {
+                                                 }
+                                               },
+                                               icon: const Icon(
+-                                                Icons.share,
+-                                                size: 20,
+-                                              ),
++                                                  Icons.share_outlined),
+                                             ),
+-                                          // Export button - opens export dialog
+                                           IconButton(
++                                            iconSize: 26,
++                                            tooltip: "More",
++                                            onPressed: () =>
++                                                _openMoreSheet(context,
++                                                    playlistController),
++                                            icon: const Icon(Icons.more_vert),
++                                          ),
++                                          const Spacer(),
++                                          // Shuffle (green)
++                                          IconButton(
++                                            iconSize: 30,
++                                            tooltip: "shuffle".tr,
+                                             onPressed: () {
+-                                              showDialog(
+-                                                context: context,
+-                                                builder: (dialogContext) =>
+-                                                    PlaylistExportDialog(
+-                                                  controller: playlistController,
+-                                                  parentContext: context,
+-                                                ),
+-                                              );
++                                              final songsToplay =
++                                                  List<MediaItem>.from(
++                                                      playlistController
++                                                          .songList);
++                                              songsToplay.shuffle();
++                                              songsToplay.shuffle();
++                                              playerController.playPlayListSong(
++                                                  songsToplay, 0,
++                                                  playfrom: PlaylingFrom(
++                                                      name: pl.title,
++                                                      type: PlaylingFromType
++                                                          .PLAYLIST));
++                                            },
++                                            icon: const Icon(Icons.shuffle,
++                                                color: spGreen),
++                                          ),
++                                          const SizedBox(width: 4),
++                                          // Play (big green circle)
++                                          GestureDetector(
++                                            onTap: () {
++                                              playerController.playPlayListSong(
++                                                  List<MediaItem>.from(
++                                                      playlistController
++                                                          .songList),
++                                                  0,
++                                                  playfrom: PlaylingFrom(
++                                                      name: pl.title,
++                                                      type: PlaylingFromType
++                                                          .PLAYLIST));
+                                             },
+-                                            icon: const Icon(Icons.file_upload),
+-                                            tooltip: "exportPlaylist".tr,
++                                            child: Container(
++                                              width: 56,
++                                              height: 56,
++                                              decoration: const BoxDecoration(
++                                                  color: spGreen,
++                                                  shape: BoxShape.circle),
++                                              child: const Icon(
++                                                  Icons.play_arrow_rounded,
++                                                  color: Colors.black,
++                                                  size: 36),
++                                            ),
+                                           ),
+                                         ],
+                                       ),
+                                     ),
+-                                  ),
+-                                );
+-                              } else if (index == 1) {
+-                                final title =
+-                                    playlistController.playlist.value.title;
+-                                final description = playlistController
+-                                    .playlist.value.description;
+-
+-                                return AnimatedBuilder(
+-                                  animation:
+-                                      playlistController.animationController,
+-                                  builder: (context, child) {
+-                                    return SizedBox(
+-                                      height: playlistController
+-                                          .heightAnimation.value,
+-                                      child: Transform.scale(
+-                                        scale: playlistController
+-                                            .scaleAnimation.value,
+-                                        child: child,
+-                                      ),
+-                                    );
+-                                  },
+-                                  child: Padding(
+-                                    padding: const EdgeInsets.only(
+-                                        left: 25.0, bottom: 10, right: 30),
+-                                    child: Column(
+-                                      crossAxisAlignment:
+-                                          CrossAxisAlignment.start,
+-                                      children: [
+-                                        Marquee(
+-                                          delay:
+-                                              const Duration(milliseconds: 300),
+-                                          duration: const Duration(seconds: 5),
+-                                          id: title.hashCode.toString(),
+-                                          child: Text(
+-                                            title.length > 50
+-                                                ? title.substring(0, 50)
+-                                                : title,
+-                                            maxLines: 1,
+-                                            style: Theme.of(context)
+-                                                .textTheme
+-                                                .titleLarge!
+-                                                .copyWith(fontSize: 30),
+-                                          ),
+-                                        ),
+-                                        Padding(
+-                                          padding:
+-                                              const EdgeInsets.only(top: 8.0),
+-                                          child: Marquee(
+-                                            delay: const Duration(
+-                                                milliseconds: 300),
+-                                            duration:
+-                                                const Duration(seconds: 5),
+-                                            id: description.hashCode.toString(),
+-                                            child: Text(
+-                                              description ?? "playlist".tr,
+-                                              maxLines: 1,
+-                                              style: Theme.of(context)
+-                                                  .textTheme
+-                                                  .titleSmall,
+-                                            ),
+-                                          ),
+-                                        ),
+-                                      ],
++                                    // Pill buttons: Add / Name & details
++                                    SingleChildScrollView(
++                                      scrollDirection: Axis.horizontal,
++                                      padding: const EdgeInsets.fromLTRB(
++                                          16, 0, 6, 10),
++                                      child: Row(children: [
++                                        SpPillButton(Icons.add, 'Add',
++                                            onTap: () => Get.find<
++                                                    HomeScreenController>()
++                                                .onBottonBarTabSelected(1)),
++                                        if (isLocal)
++                                          SpPillButton(
++                                              Icons.edit_outlined,
++                                              'Name & details',
++                                              onTap: () => showDialog(
++                                                    context: context,
++                                                    builder: (context) =>
++                                                        CreateNRenamePlaylistPopup(
++                                                            renamePlaylist:
++                                                                true,
++                                                            playlist: pl),
++                                                  )),
++                                      ]),
+                                     ),
+-                                  ),
++                                  ],
+                                 );
+                               } else if (index == 2) {
+                                 return SizedBox(
+@@ -626,7 +465,7 @@ class PlaylistScreen extends StatelessWidget {
+                                           tag: playlistController
+                                               .playlist.value.playlistId,
+                                           screenController: playlistController,
+-                                          isSearchFeatureRequired: true,
++                                          isSearchFeatureRequired: false,
+                                           isPlaylistRearrageFeatureRequired: !playlistController
+                                                   .playlist
+                                                   .value
+@@ -722,6 +561,107 @@ class PlaylistScreen extends StatelessWidget {
+     );
+   }
+ 
++  /// Bottom sheet behind the ⋮ button: the actions that used to be in the
++  /// old icon row (library bookmark, enqueue, sync, export, ...).
++  Future _openMoreSheet(
++      BuildContext context, PlaylistScreenController playlistController) {
++    final pl = playlistController.playlist.value;
++    return showModalBottomSheet(
++      constraints: const BoxConstraints(maxWidth: 500),
++      shape: const RoundedRectangleBorder(
++        borderRadius: BorderRadius.vertical(top: Radius.circular(10.0)),
++      ),
++      context: Get.find<PlayerController>().homeScaffoldkey.currentState!.context,
++      barrierColor: Colors.transparent.withAlpha(100),
++      builder: (sheetContext) => SafeArea(
++        child: Column(
++          mainAxisSize: MainAxisSize.min,
++          children: [
++            if (!pl.isPipedPlaylist && pl.isCloudPlaylist)
++              ListTile(
++                leading: Icon(playlistController.isAddedToLibrary.isFalse
++                    ? Icons.bookmark_add
++                    : Icons.bookmark_added),
++                title: Text(playlistController.isAddedToLibrary.isFalse
++                    ? "addToLibrary".tr
++                    : "removeFromLibrary".tr),
++                onTap: () {
++                  Navigator.of(sheetContext).pop();
++                  final add = playlistController.isAddedToLibrary.isFalse;
++                  playlistController
++                      .addNremoveFromLibrary(pl, add: add)
++                      .then((value) {
++                    if (!context.mounted) return;
++                    ScaffoldMessenger.of(context).showSnackBar(snackbar(
++                        context,
++                        value
++                            ? add
++                                ? "playlistBookmarkAddAlert".tr
++                                : "listBookmarkRemoveAlert".tr
++                            : "operationFailed".tr,
++                        size: SanckBarSize.MEDIUM));
++                  });
++                },
++              ),
++            ListTile(
++              leading: const Icon(Icons.merge),
++              title: Text("enqueueSongs".tr),
++              onTap: () {
++                Navigator.of(sheetContext).pop();
++                Get.find<PlayerController>()
++                    .enqueueSongList(playlistController.songList.toList())
++                    .whenComplete(() {
++                  if (context.mounted) {
++                    ScaffoldMessenger.of(context).showSnackBar(snackbar(
++                        context, "songEnqueueAlert".tr,
++                        size: SanckBarSize.MEDIUM));
++                  }
++                });
++              },
++            ),
++            if (playlistController.isAddedToLibrary.isTrue)
++              ListTile(
++                leading: const Icon(Icons.cloud_sync),
++                title: Text("syncPlaylistSongs".tr),
++                onTap: () {
++                  Navigator.of(sheetContext).pop();
++                  playlistController.syncPlaylistSongs();
++                },
++              ),
++            if (pl.isPipedPlaylist)
++              ListTile(
++                leading: const Icon(Icons.block),
++                title: Text("blacklistPipedPlaylist".tr),
++                onTap: () {
++                  Navigator.of(sheetContext).pop();
++                  Get.nestedKey(ScreenNavigationSetup.id)!.currentState!.pop();
++                  Get.find<LibraryPlaylistsController>()
++                      .blacklistPipedPlaylist(pl);
++                  ScaffoldMessenger.of(Get.context!).showSnackBar(snackbar(
++                      Get.context!, "playlistBlacklistAlert".tr,
++                      size: SanckBarSize.MEDIUM));
++                },
++              ),
++            ListTile(
++              leading: const Icon(Icons.file_upload),
++              title: Text("exportPlaylist".tr),
++              onTap: () {
++                Navigator.of(sheetContext).pop();
++                showDialog(
++                  context: context,
++                  builder: (dialogContext) => PlaylistExportDialog(
++                    controller: playlistController,
++                    parentContext: context,
++                  ),
++                );
++              },
++            ),
++          ],
++        ),
++      ),
++    );
++  }
++
+   Future openBottomSheet(BuildContext context, MediaItem song) {
+     return showModalBottomSheet(
+       constraints: const BoxConstraints(maxWidth: 500),
+diff --git a/lib/ui/screens/Search/search_screen.dart b/lib/ui/screens/Search/search_screen.dart
+index 5567e2f..312f218 100644
+--- a/lib/ui/screens/Search/search_screen.dart
++++ b/lib/ui/screens/Search/search_screen.dart
+@@ -3,7 +3,9 @@ import 'package:get/get.dart';
+ 
+ import 'components/search_item.dart';
+ import '/ui/screens/Settings/settings_screen_controller.dart';
+-import '../../widgets/modified_text_field.dart';
++import '../../widgets/snackbar.dart';
++import '../../widgets/spotify_discover.dart';
++import '../../widgets/spotify_style.dart';
+ import '/ui/navigator.dart';
+ import 'search_screen_controller.dart';
+ 
+@@ -14,7 +16,8 @@ class SearchScreen extends StatelessWidget {
+   Widget build(BuildContext context) {
+     final searchScreenController = Get.put(SearchScreenController());
+     final settingsScreenController = Get.find<SettingsScreenController>();
+-    final topPadding = context.isLandscape ? 50.0 : 80.0;
++    final topPadding =
++        context.isLandscape ? 30.0 : MediaQuery.of(context).padding.top + 12;
+     return Scaffold(
+       resizeToAvoidBottomInset: false,
+       body: Obx(
+@@ -55,45 +58,78 @@ class SearchScreen extends StatelessWidget {
+                 padding: EdgeInsets.only(top: topPadding, left: 5),
+                 child: Column(
+                   children: [
+-                    Align(
+-                      alignment: Alignment.centerLeft,
+-                      child: Text(
+-                        "search".tr,
+-                        style: Theme.of(context).textTheme.titleLarge,
+-                      ),
+-                    ),
+-                    const SizedBox(
+-                      height: 10,
++                    Padding(
++                      padding: const EdgeInsets.only(right: 16),
++                      child: Row(children: [
++                        const SpAvatar(size: 36),
++                        const SizedBox(width: 14),
++                        const Text('Search',
++                            style: TextStyle(
++                                fontSize: 28, fontWeight: FontWeight.w800)),
++                        const Spacer(),
++                        IconButton(
++                            tooltip: 'Camera search',
++                            onPressed: () {
++                              ScaffoldMessenger.of(context).showSnackBar(
++                                  snackbar(context,
++                                      "Camera search isn't available here",
++                                      size: SanckBarSize.MEDIUM));
++                            },
++                            icon: const Icon(Icons.photo_camera_outlined,
++                                size: 28)),
++                      ]),
+                     ),
+-                    ModifiedTextField(
+-                      textCapitalization: TextCapitalization.sentences,
+-                      controller: searchScreenController.textInputController,
+-                      textInputAction: TextInputAction.search,
+-                      onChanged: searchScreenController.onChanged,
+-                      onSubmitted: (val) {
+-                        if (val.contains("https://")) {
+-                          searchScreenController.filterLinks(Uri.parse(val));
+-                          searchScreenController.reset();
+-                          return;
+-                        }
+-                        Get.toNamed(ScreenNavigationSetup.searchResultScreen,
+-                            id: ScreenNavigationSetup.id, arguments: val);
+-                        searchScreenController.addToHistryQueryList(val);
+-                      },
+-                      autofocus: settingsScreenController
+-                          .isBottomNavBarEnabled.isFalse,
+-                      cursorColor: Theme.of(context).textTheme.bodySmall!.color,
+-                      decoration: InputDecoration(
+-                          contentPadding: const EdgeInsets.only(left: 5),
+-                          focusColor: Colors.white,
+-                          hintText: "searchDes".tr,
+-                          suffix: IconButton(
+-                            onPressed: searchScreenController.reset,
+-                            icon: const Icon(Icons.close),
+-                            splashRadius: 16,
+-                            iconSize: 19,
+-                          )),
++                    const SizedBox(height: 14),
++                    Padding(
++                      padding: const EdgeInsets.only(right: 16),
++                      child: TextField(
++                        textCapitalization: TextCapitalization.sentences,
++                        controller: searchScreenController.textInputController,
++                        textInputAction: TextInputAction.search,
++                        onChanged: searchScreenController.onChanged,
++                        onSubmitted: (val) {
++                          if (val.contains("https://")) {
++                            searchScreenController.filterLinks(Uri.parse(val));
++                            searchScreenController.reset();
++                            return;
++                          }
++                          Get.toNamed(ScreenNavigationSetup.searchResultScreen,
++                              id: ScreenNavigationSetup.id, arguments: val);
++                          searchScreenController.addToHistryQueryList(val);
++                        },
++                        autofocus: settingsScreenController
++                            .isBottomNavBarEnabled.isFalse,
++                        cursorColor: Colors.black,
++                        style: const TextStyle(
++                            color: Colors.black,
++                            fontSize: 16,
++                            fontWeight: FontWeight.w600),
++                        decoration: InputDecoration(
++                            filled: true,
++                            fillColor: Colors.white,
++                            isDense: true,
++                            contentPadding:
++                                const EdgeInsets.symmetric(vertical: 14),
++                            border: OutlineInputBorder(
++                                borderRadius: BorderRadius.circular(6),
++                                borderSide: BorderSide.none),
++                            prefixIcon: const Icon(Icons.search_rounded,
++                                color: Colors.black, size: 28),
++                            hintText: 'What do you want to listen to?',
++                            hintStyle: const TextStyle(
++                                color: Color(0xFF6A6A6A),
++                                fontSize: 16,
++                                fontWeight: FontWeight.w600),
++                            suffixIcon: IconButton(
++                              onPressed: searchScreenController.reset,
++                              icon: const Icon(Icons.close,
++                                  color: Colors.black),
++                              splashRadius: 16,
++                              iconSize: 20,
++                            )),
++                      ),
+                     ),
++                    const SizedBox(height: 6),
+                     Expanded(
+                       child: Obx(() {
+                         final isEmpty = searchScreenController
+@@ -133,11 +169,15 @@ class SearchScreen extends StatelessWidget {
+                                       ),
+                                     )
+                                   ]
+-                                : list
+-                                    .map((item) => SearchItem(
++                                : [
++                                    ...list.map((item) => SearchItem(
+                                         queryString: item,
+-                                        isHistoryString: isEmpty))
+-                                    .toList());
++                                        isHistoryString: isEmpty)),
++                                    if (searchScreenController
++                                            .textInputController.text ==
++                                        "")
++                                      const SpotifyDiscover(),
++                                  ]);
+                       }),
+                     )
+                   ],
+diff --git a/lib/ui/screens/Settings/settings_screen.dart b/lib/ui/screens/Settings/settings_screen.dart
+index 366188d..55e9d99 100644
+--- a/lib/ui/screens/Settings/settings_screen.dart
++++ b/lib/ui/screens/Settings/settings_screen.dart
+@@ -12,6 +12,8 @@ import '../../widgets/restore_dialog.dart';
+ import '../Library/library_controller.dart';
+ import '../../widgets/snackbar.dart';
+ import '/ui/widgets/link_piped.dart';
++import '/ui/widgets/spotify_login_dialog.dart';
++import '/services/spotify_service.dart';
+ import '/services/music_service.dart';
+ import '/ui/player/player_controller.dart';
+ import '/ui/utils/theme_controller.dart';
+@@ -260,6 +262,42 @@ class SettingsScreen extends StatelessWidget {
+                               onChanged:
+                                   settingsController.toggleCacheHomeScreenData),
+                         )),
++                    ListTile(
++                      contentPadding:
++                          const EdgeInsets.only(left: 5, right: 10, top: 0),
++                      title: const Text("Spotify"),
++                      subtitle: Text(
++                          "Import your Spotify playlists, albums and artists",
++                          style: Theme.of(context).textTheme.bodyMedium),
++                      trailing: Obx(() {
++                        final sp = Get.find<SpotifyService>();
++                        return TextButton(
++                            child: Text(
++                                sp.isLoggedIn.value ? "Re-sync" : "Log in",
++                                style: Theme.of(context)
++                                    .textTheme
++                                    .titleMedium!
++                                    .copyWith(fontSize: 15)),
++                            onPressed: () async {
++                              if (sp.isLoggedIn.value) {
++                                ScaffoldMessenger.of(context).showSnackBar(
++                                    snackbar(context, "Syncing Spotify in background…",
++                                        size: SanckBarSize.BIG));
++                                final err = await sp.importLibrary();
++                                if (context.mounted) {
++                                  ScaffoldMessenger.of(context).showSnackBar(
++                                      snackbar(context, err ?? "Spotify sync done",
++                                          size: SanckBarSize.BIG));
++                                }
++                              } else {
++                                showDialog(
++                                    context: context,
++                                    barrierDismissible: false,
++                                    builder: (_) => const SpotifyLoginDialog());
++                              }
++                            });
++                      }),
++                    ),
+                     ListTile(
+                       contentPadding:
+                           const EdgeInsets.only(left: 5, right: 10, top: 0),
+diff --git a/lib/ui/widgets/bottom_nav_bar.dart b/lib/ui/widgets/bottom_nav_bar.dart
+index c30bf53..064b60e 100644
+--- a/lib/ui/widgets/bottom_nav_bar.dart
++++ b/lib/ui/widgets/bottom_nav_bar.dart
+@@ -2,8 +2,14 @@ import 'package:flutter/material.dart';
+ import 'package:get/get.dart';
+ import 'package:harmonymusic/ui/screens/Home/home_screen_controller.dart';
+ 
+-/// Bottom navigation styled after Spotify's: near-black translucent bar,
+-/// no selection indicator, white active item and grey inactive items.
++import 'create_playlist_dialog.dart';
++import 'spotify_style.dart';
++
++/// Bottom navigation styled after Spotify's:
++/// Home / Search / Your Library / Premium / Create.
++///
++/// * "Premium" opens the settings tab (Spotify login + sync live there).
++/// * "Create" is an action, not a tab: it opens the new-playlist dialog.
+ class BottomNavBar extends StatelessWidget {
+   const BottomNavBar({super.key});
+ 
+@@ -28,43 +34,55 @@ class BottomNavBar extends StatelessWidget {
+                   : _inactive)),
+         ),
+         child: NavigationBar(
+-            onDestinationSelected: homeScreenController.onBottonBarTabSelected,
++            onDestinationSelected: (i) {
++              if (i == 4) {
++                showDialog(
++                    context: context,
++                    builder: (context) => const CreateNRenamePlaylistPopup());
++                return;
++              }
++              homeScreenController.onBottonBarTabSelected(i);
++            },
+             selectedIndex: homeScreenController.tabIndex.toInt(),
+-            backgroundColor: const Color(0xFF121212).withOpacity(0.96),
++            backgroundColor: spBg.withOpacity(0.96),
+             surfaceTintColor: Colors.transparent,
+             shadowColor: Colors.transparent,
+             indicatorColor: Colors.transparent,
+             elevation: 0,
+             height: 62,
+             labelBehavior: NavigationDestinationLabelBehavior.alwaysShow,
+-            destinations: [
++            destinations: const [
++              NavigationDestination(
++                selectedIcon: Icon(Icons.home_rounded),
++                icon: Icon(Icons.home_outlined),
++                label: 'Home',
++              ),
+               NavigationDestination(
+-                selectedIcon: const Icon(Icons.home_rounded),
+-                icon: const Icon(Icons.home_outlined),
+-                label: modifyNgetlabel('home'.tr),
++                selectedIcon: Icon(Icons.search_rounded),
++                icon: Icon(Icons.search_rounded),
++                label: 'Search',
+               ),
+               NavigationDestination(
+-                selectedIcon: const Icon(Icons.search_rounded),
+-                icon: const Icon(Icons.search_rounded),
+-                label: modifyNgetlabel('search'.tr),
++                selectedIcon: Icon(Icons.view_week_rounded),
++                icon: Icon(Icons.view_week_outlined),
++                label: 'Your Library',
+               ),
+               NavigationDestination(
+-                selectedIcon: const Icon(Icons.library_music_rounded),
+-                icon: const Icon(Icons.library_music_outlined),
+-                label: modifyNgetlabel('library'.tr),
++                selectedIcon: Badge(
++                    smallSize: 9,
++                    backgroundColor: spBlue,
++                    child: Icon(Icons.workspace_premium_rounded)),
++                icon: Badge(
++                    smallSize: 9,
++                    backgroundColor: spBlue,
++                    child: Icon(Icons.workspace_premium_outlined)),
++                label: 'Premium',
+               ),
+               NavigationDestination(
+-                selectedIcon: const Icon(Icons.settings_rounded),
+-                icon: const Icon(Icons.settings_outlined),
+-                label: modifyNgetlabel('settings'.tr),
++                selectedIcon: Icon(Icons.add_rounded),
++                icon: Icon(Icons.add_rounded),
++                label: 'Create',
+               ),
+             ])));
+   }
+-
+-  String modifyNgetlabel(String label) {
+-    if (label.length > 9) {
+-      return "${label.substring(0, 8)}..";
+-    }
+-    return label;
+-  }
+ }
+diff --git a/lib/ui/widgets/spotify_discover.dart b/lib/ui/widgets/spotify_discover.dart
+new file mode 100644
+index 0000000..3a72e1c
+--- /dev/null
++++ b/lib/ui/widgets/spotify_discover.dart
+@@ -0,0 +1,124 @@
++import 'package:flutter/material.dart';
++import 'package:get/get.dart';
++
++import '../navigator.dart';
++
++/// "Discover something new" (tall tag cards) and the browse-category grid
++/// shown on the Search tab while the search field is empty. Tapping a card
++/// searches for its label.
++class SpotifyDiscover extends StatelessWidget {
++  const SpotifyDiscover({super.key});
++
++  static const _tags = <(String, List<Color>)>[
++    ('#digicore', [Color(0xFF1F3A4D), Color(0xFF0B1620)]),
++    ('#cloud rap', [Color(0xFF8E7CC3), Color(0xFF3B3055)]),
++    ('#hyperpop', [Color(0xFFD6336C), Color(0xFF4A1230)]),
++    ('#jersey club', [Color(0xFF2B8A3E), Color(0xFF0F3A1A)]),
++    ('#shoegaze', [Color(0xFF5C7CFA), Color(0xFF1B2A66)]),
++  ];
++
++  static const _browse = <(String, Color)>[
++    ('Made For You', Color(0xFF8D67AB)),
++    ('Upcoming Releases', Color(0xFF056952)),
++    ('New Releases', Color(0xFF608108)),
++    ('Charts', Color(0xFF8D67AB)),
++    ('Pop', Color(0xFF148A08)),
++    ('Hip-Hop', Color(0xFFBC5900)),
++    ('Rock', Color(0xFFE91429)),
++    ('Indie', Color(0xFFDC148C)),
++    ('Dance', Color(0xFF0D73EC)),
++    ('Chill', Color(0xFF477D95)),
++  ];
++
++  void _search(String q) => Get.toNamed(ScreenNavigationSetup.searchResultScreen,
++      id: ScreenNavigationSetup.id, arguments: q.replaceFirst('#', ''));
++
++  @override
++  Widget build(BuildContext context) {
++    return Column(
++      crossAxisAlignment: CrossAxisAlignment.start,
++      children: [
++        const SizedBox(height: 18),
++        const Text('Discover something new',
++            style: TextStyle(fontSize: 22, fontWeight: FontWeight.w800)),
++        const SizedBox(height: 12),
++        SizedBox(
++          height: 270,
++          child: ListView.separated(
++            scrollDirection: Axis.horizontal,
++            itemCount: _tags.length,
++            separatorBuilder: (_, __) => const SizedBox(width: 12),
++            itemBuilder: (_, i) {
++              final t = _tags[i];
++              return GestureDetector(
++                onTap: () => _search(t.$1),
++                child: Container(
++                  width: 180,
++                  padding: const EdgeInsets.all(12),
++                  alignment: Alignment.bottomLeft,
++                  decoration: BoxDecoration(
++                      borderRadius: BorderRadius.circular(8),
++                      gradient: LinearGradient(
++                          begin: Alignment.topCenter,
++                          end: Alignment.bottomCenter,
++                          colors: t.$2)),
++                  child: Text(t.$1,
++                      style: const TextStyle(
++                          fontSize: 17, fontWeight: FontWeight.w800)),
++                ),
++              );
++            },
++          ),
++        ),
++        const SizedBox(height: 22),
++        const Text('Browse all',
++            style: TextStyle(fontSize: 22, fontWeight: FontWeight.w800)),
++        const SizedBox(height: 12),
++        Padding(
++          padding: const EdgeInsets.only(right: 16),
++          child: GridView.builder(
++            shrinkWrap: true,
++            physics: const NeverScrollableScrollPhysics(),
++            gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
++                crossAxisCount: 2,
++                mainAxisSpacing: 12,
++                crossAxisSpacing: 12,
++                mainAxisExtent: 100),
++            itemCount: _browse.length,
++            itemBuilder: (_, i) {
++              final b = _browse[i];
++              return GestureDetector(
++                onTap: () => _search(b.$1),
++                child: Container(
++                  clipBehavior: Clip.antiAlias,
++                  decoration: BoxDecoration(
++                      color: b.$2, borderRadius: BorderRadius.circular(8)),
++                  child: Stack(children: [
++                    Positioned(
++                        right: -14,
++                        bottom: -6,
++                        child: Transform.rotate(
++                            angle: 0.42,
++                            child: Container(
++                                width: 64,
++                                height: 64,
++                                decoration: BoxDecoration(
++                                    color: Colors.black26,
++                                    borderRadius: BorderRadius.circular(4))))),
++                    Padding(
++                      padding: const EdgeInsets.all(12),
++                      child: Text(b.$1,
++                          style: const TextStyle(
++                              fontSize: 18, fontWeight: FontWeight.w800)),
++                    ),
++                  ]),
++                ),
++              );
++            },
++          ),
++        ),
++      ],
++    );
++  }
++}
++
+diff --git a/lib/ui/widgets/spotify_home_header.dart b/lib/ui/widgets/spotify_home_header.dart
+new file mode 100644
+index 0000000..d70c107
+--- /dev/null
++++ b/lib/ui/widgets/spotify_home_header.dart
+@@ -0,0 +1,79 @@
++import 'package:flutter/material.dart';
++import 'package:get/get.dart';
++
++import '../screens/Library/library_controller.dart';
++import 'spotify_style.dart';
++
++/// Spotify-style top of the home screen: filter chips and a 2-column
++/// "quick access" grid made from the user's library.
++class SpotifyHomeHeader extends StatelessWidget {
++  const SpotifyHomeHeader({super.key});
++
++  @override
++  Widget build(BuildContext context) {
++    return Padding(
++      padding: const EdgeInsets.only(right: 16, bottom: 12),
++      child: Column(
++        crossAxisAlignment: CrossAxisAlignment.start,
++        children: [
++          SingleChildScrollView(
++            scrollDirection: Axis.horizontal,
++            child: Row(children: [
++              const Padding(
++                  padding: EdgeInsets.only(right: 12), child: SpAvatar(size: 36)),
++              const SpChip('All', selected: true),
++              const SpChip('Music'),
++              const SpChip('Podcasts'),
++              const SpChip('Audiobooks'),
++            ]),
++          ),
++          const SizedBox(height: 16),
++          Obx(() {
++            // Rebuild when any library list changes.
++            Get.find<LibraryPlaylistsController>().libraryPlaylists.length;
++            Get.find<LibraryAlbumsController>().libraryAlbums.length;
++            Get.find<LibraryArtistsController>().libraryArtists.length;
++            final entries = buildLibraryEntries()
++                .take(8)
++                .toList();
++            if (entries.isEmpty) return const SizedBox.shrink();
++            return GridView.builder(
++              shrinkWrap: true,
++              physics: const NeverScrollableScrollPhysics(),
++              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
++                  crossAxisCount: 2,
++                  mainAxisSpacing: 8,
++                  crossAxisSpacing: 8,
++                  mainAxisExtent: 56),
++              itemCount: entries.length,
++              itemBuilder: (context, i) {
++                final e = entries[i];
++                return InkWell(
++                  onTap: e.open,
++                  child: Container(
++                    decoration: BoxDecoration(
++                        color: spSurface,
++                        borderRadius: BorderRadius.circular(6)),
++                    clipBehavior: Clip.antiAlias,
++                    child: Row(children: [
++                      e.thumb(56),
++                      const SizedBox(width: 10),
++                      Expanded(
++                        child: Text(e.title,
++                            maxLines: 2,
++                            overflow: TextOverflow.ellipsis,
++                            style: const TextStyle(
++                                fontSize: 13, fontWeight: FontWeight.w700)),
++                      ),
++                      const SizedBox(width: 6),
++                    ]),
++                  ),
++                );
++              },
++            );
++          }),
++        ],
++      ),
++    );
++  }
++}
+diff --git a/lib/ui/widgets/spotify_login_dialog.dart b/lib/ui/widgets/spotify_login_dialog.dart
+new file mode 100644
+index 0000000..1f0e460
+--- /dev/null
++++ b/lib/ui/widgets/spotify_login_dialog.dart
+@@ -0,0 +1,116 @@
++import 'package:flutter/material.dart';
++import 'package:get/get.dart';
++
++import '../../services/spotify_service.dart';
++import 'spotify_web_login.dart';
++
++/// Asks the user to log in with Spotify, then imports their library.
++class SpotifyLoginDialog extends StatefulWidget {
++  const SpotifyLoginDialog({super.key});
++
++  static bool _shownThisSession = false;
++
++  /// Shown once on launch until the user logs in or taps "Skip".
++  static void showIfNeeded(BuildContext context) {
++    final sp = Get.find<SpotifyService>();
++    if (_shownThisSession || !sp.needsLogin) return;
++    _shownThisSession = true;
++    WidgetsBinding.instance.addPostFrameCallback((_) {
++      if (context.mounted) {
++        showDialog(
++            context: context,
++            barrierDismissible: false,
++            builder: (_) => const SpotifyLoginDialog());
++      }
++    });
++  }
++
++  @override
++  State<SpotifyLoginDialog> createState() => _SpotifyLoginDialogState();
++}
++
++class _SpotifyLoginDialogState extends State<SpotifyLoginDialog> {
++  final sp = Get.find<SpotifyService>();
++  String? error;
++  bool busy = false;
++
++  Future<void> _login() async {
++    setState(() {
++      busy = true;
++      error = null;
++    });
++    final ok = await Navigator.of(context).push<bool>(
++        MaterialPageRoute(builder: (_) => const SpotifyWebLogin()));
++    if (ok != true) {
++      if (mounted) setState(() => busy = false);
++      return;
++    }
++    final err = await sp.importLibrary();
++    if (!mounted) return;
++    if (err != null) {
++      setState(() {
++        busy = false;
++        error = err;
++      });
++    } else {
++      Navigator.of(context).pop();
++    }
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    return Dialog(
++      child: Padding(
++        padding: const EdgeInsets.all(24),
++        child: SingleChildScrollView(
++          child: Obx(() {
++            if (sp.isImporting.value) {
++              return Column(mainAxisSize: MainAxisSize.min, children: [
++                Text('Importing from Spotify',
++                    style: Theme.of(context).textTheme.titleLarge),
++                const SizedBox(height: 20),
++                LinearProgressIndicator(value: sp.progress.value),
++                const SizedBox(height: 12),
++                Text(sp.status.value,
++                    maxLines: 1, overflow: TextOverflow.ellipsis),
++                const SizedBox(height: 8),
++                Text('Matching every track to YouTube Music. This can take a '
++                    'few minutes the first time.',
++                    style: Theme.of(context).textTheme.bodySmall),
++              ]);
++            }
++            return Column(mainAxisSize: MainAxisSize.min, children: [
++              Text('Log in with Spotify',
++                  style: Theme.of(context).textTheme.titleLarge),
++              const SizedBox(height: 12),
++              Text('Your playlists, liked songs, albums and artists will be '
++                  'imported. Audio is still streamed from YouTube Music. A '
++                  'free Spotify account works.',
++                  style: Theme.of(context).textTheme.bodyMedium),
++              if (error != null)
++                Padding(
++                  padding: const EdgeInsets.only(top: 12),
++                  child: Text(error!,
++                      style: const TextStyle(color: Colors.redAccent)),
++                ),
++              const SizedBox(height: 16),
++              Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
++                TextButton(
++                    onPressed: busy
++                        ? null
++                        : () {
++                            sp.skip();
++                            Navigator.of(context).pop();
++                          },
++                    child: const Text('Skip')),
++                FilledButton(
++                    onPressed: busy ? null : _login,
++                    child: const Text('Log in')),
++              ]),
++            ]);
++          }),
++        ),
++      ),
++    );
++  }
++}
+diff --git a/lib/ui/widgets/spotify_playlist_widgets.dart b/lib/ui/widgets/spotify_playlist_widgets.dart
+new file mode 100644
+index 0000000..2ea1642
+--- /dev/null
++++ b/lib/ui/widgets/spotify_playlist_widgets.dart
+@@ -0,0 +1,184 @@
++import 'package:audio_service/audio_service.dart';
++import 'package:cached_network_image/cached_network_image.dart';
++import 'package:flutter/material.dart';
++
++import '/models/thumbnail.dart';
++import 'spotify_style.dart';
++
++/// "Find on this page" search bar shown at the top of a playlist.
++/// Calls [onStart] on the first keystroke, [onSearch] on every change and
++/// [onClose] when the field is emptied again.
++class SpFindOnPage extends StatefulWidget {
++  const SpFindOnPage(
++      {super.key,
++      required this.onStart,
++      required this.onSearch,
++      required this.onClose});
++  final VoidCallback onStart;
++  final ValueChanged<String> onSearch;
++  final VoidCallback onClose;
++
++  @override
++  State<SpFindOnPage> createState() => _SpFindOnPageState();
++}
++
++class _SpFindOnPageState extends State<SpFindOnPage> {
++  final _c = TextEditingController();
++  bool _started = false;
++
++  void _changed(String v) {
++    if (v.isEmpty) {
++      if (_started) widget.onClose();
++      _started = false;
++    } else {
++      if (!_started) widget.onStart();
++      _started = true;
++      widget.onSearch(v);
++    }
++  }
++
++  @override
++  void dispose() {
++    if (_started) Future.microtask(widget.onClose);
++    _c.dispose();
++    super.dispose();
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    return Padding(
++      padding: const EdgeInsets.fromLTRB(16, 4, 16, 16),
++      child: TextField(
++        controller: _c,
++        onChanged: _changed,
++        style: const TextStyle(fontWeight: FontWeight.w600),
++        decoration: InputDecoration(
++            isDense: true,
++            filled: true,
++            fillColor: Colors.white24,
++            contentPadding: const EdgeInsets.symmetric(vertical: 13),
++            hintText: 'Find on this page',
++            hintStyle: const TextStyle(
++                color: Colors.white70, fontWeight: FontWeight.w700),
++            prefixIcon: const Icon(Icons.search, size: 24),
++            border: OutlineInputBorder(
++                borderRadius: BorderRadius.circular(6),
++                borderSide: BorderSide.none)),
++      ),
++    );
++  }
++}
++
++String spTotalDuration(List<MediaItem> songs) {
++  final d = songs.fold<Duration>(
++      Duration.zero, (a, s) => a + (s.duration ?? Duration.zero));
++  final h = d.inHours;
++  final m = d.inMinutes % 60;
++  return h > 0 ? '${h}h ${m}min' : '${m}min';
++}
++
++/// Big centred cover, title, description, owner chip and "N songs • time".
++class SpPlaylistHeader extends StatelessWidget {
++  const SpPlaylistHeader(
++      {super.key,
++      required this.title,
++      required this.description,
++      required this.thumbnailUrl,
++      required this.owner,
++      required this.songs});
++  final String title;
++  final String? description;
++  final String thumbnailUrl;
++  final String owner;
++  final List<MediaItem> songs;
++
++  @override
++  Widget build(BuildContext context) {
++    final width = MediaQuery.of(context).size.width;
++    final cover = (width * 0.68).clamp(180.0, 320.0).toDouble();
++    final desc = (description ?? '').trim();
++    return Column(
++      crossAxisAlignment: CrossAxisAlignment.start,
++      children: [
++        Center(
++          child: Container(
++            width: cover,
++            height: cover,
++            decoration: const BoxDecoration(boxShadow: [
++              BoxShadow(color: Colors.black45, blurRadius: 24, offset: Offset(0, 8))
++            ]),
++            child: CachedNetworkImage(
++              imageUrl: Thumbnail(thumbnailUrl).extraHigh,
++              fit: BoxFit.cover,
++              errorWidget: (_, __, ___) =>
++                  const ColoredBox(color: spSurface),
++            ),
++          ),
++        ),
++        Padding(
++          padding: const EdgeInsets.fromLTRB(16, 20, 16, 0),
++          child: Text(title,
++              maxLines: 2,
++              overflow: TextOverflow.ellipsis,
++              style: const TextStyle(fontSize: 26, fontWeight: FontWeight.w800)),
++        ),
++        if (desc.isNotEmpty)
++          Padding(
++            padding: const EdgeInsets.fromLTRB(16, 6, 16, 0),
++            child: Text(desc,
++                maxLines: 2,
++                overflow: TextOverflow.ellipsis,
++                style: const TextStyle(fontSize: 15, color: spGrey)),
++          ),
++        Padding(
++          padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
++          child: Row(children: [
++            const SpAvatar(size: 28, dot: false),
++            const SizedBox(width: 10),
++            Text(owner,
++                style:
++                    const TextStyle(fontSize: 15, fontWeight: FontWeight.w700)),
++          ]),
++        ),
++        Padding(
++          padding: const EdgeInsets.fromLTRB(16, 10, 16, 0),
++          child: Row(children: [
++            const Icon(Icons.public, size: 20, color: spGrey),
++            const SizedBox(width: 8),
++            Text('${songs.length} songs • ${spTotalDuration(songs)}',
++                style: const TextStyle(fontSize: 14, color: spGrey)),
++          ]),
++        ),
++        const SizedBox(height: 12),
++      ],
++    );
++  }
++}
++
++/// Spotify's pill buttons under the action row: Add / Edit / Sort / Name & details.
++class SpPillButton extends StatelessWidget {
++  const SpPillButton(this.icon, this.label, {super.key, this.onTap});
++  final IconData icon;
++  final String label;
++  final VoidCallback? onTap;
++
++  @override
++  Widget build(BuildContext context) {
++    return GestureDetector(
++      onTap: onTap,
++      child: Container(
++        margin: const EdgeInsets.only(right: 10),
++        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 9),
++        decoration: BoxDecoration(
++            color: spSurface, borderRadius: BorderRadius.circular(30)),
++        child: Row(children: [
++          Icon(icon, size: 20),
++          const SizedBox(width: 8),
++          Text(label,
++              style:
++                  const TextStyle(fontSize: 14, fontWeight: FontWeight.w700)),
++        ]),
++      ),
++    );
++  }
++}
+diff --git a/lib/ui/widgets/spotify_style.dart b/lib/ui/widgets/spotify_style.dart
+new file mode 100644
+index 0000000..2d6230d
+--- /dev/null
++++ b/lib/ui/widgets/spotify_style.dart
+@@ -0,0 +1,211 @@
++import 'package:flutter/material.dart';
++import 'package:get/get.dart';
++
++import '../../models/album.dart';
++import '../../models/artist.dart';
++import '../../models/playlist.dart';
++import '../navigator.dart';
++import '../screens/Home/home_screen_controller.dart';
++import '../utils/theme_controller.dart';
++import '../screens/Library/library_controller.dart';
++import 'image_widget.dart';
++
++const spGreen = Color(0xFF1ED760);
++const spSurface = Color(0xFF282828);
++const spGrey = Color(0xFFB3B3B3);
++const spBg = Color(0xFF121212);
++const spBlue = Color(0xFF3D91F4);
++
++/// Darkened, saturated version of [base] (the dynamic album colour) used for
++/// the player gradient, the mini player card and the lyrics preview card.
++Color spTint(Color? base, {double lightness = 0.28}) {
++  final hsl = HSLColor.fromColor(base ?? const Color(0xFF1E4D78));
++  return hsl
++      .withLightness(lightness)
++      .withSaturation(hsl.saturation.clamp(0.35, 0.85).toDouble())
++      .toColor();
++}
++
++Color spThemeTint({double lightness = 0.28}) {
++  final c = Get.isRegistered<ThemeController>()
++      ? Get.find<ThemeController>().primaryColor.value
++      : null;
++  return spTint(c, lightness: lightness);
++}
++
++/// Round profile picture with Spotify's little blue notification dot.
++/// Tapping it opens the settings tab (where the Spotify login lives).
++class SpAvatar extends StatelessWidget {
++  const SpAvatar({super.key, this.size = 36, this.dot = true});
++  final double size;
++  final bool dot;
++
++  @override
++  Widget build(BuildContext context) {
++    return GestureDetector(
++      onTap: () => Get.find<HomeScreenController>().onBottonBarTabSelected(3),
++      child: Stack(clipBehavior: Clip.none, children: [
++        CircleAvatar(
++            radius: size / 2,
++            backgroundColor: spSurface,
++            child: Icon(Icons.person, size: size * 0.55, color: Colors.white)),
++        if (dot)
++          Positioned(
++              right: -1,
++              top: -1,
++              child: Container(
++                  width: 10,
++                  height: 10,
++                  decoration: const BoxDecoration(
++                      color: spBlue, shape: BoxShape.circle))),
++      ]),
++    );
++  }
++}
++
++/// Purple-to-mint "Liked Songs" cover with a white heart.
++class SpLikedCover extends StatelessWidget {
++  const SpLikedCover(this.size, {super.key});
++  final double size;
++
++  @override
++  Widget build(BuildContext context) {
++    return Container(
++      width: size,
++      height: size,
++      decoration: const BoxDecoration(
++          gradient: LinearGradient(
++              begin: Alignment.topLeft,
++              end: Alignment.bottomRight,
++              colors: [Color(0xFF450AF5), Color(0xFF8E8EE5), Color(0xFFC4EFD9)])),
++      child: Icon(Icons.favorite, color: Colors.white, size: size * 0.45),
++    );
++  }
++}
++
++/// Spotify's green "saved" check (filled) / "add" ring (outlined).
++class SpSavedButton extends StatelessWidget {
++  const SpSavedButton({super.key, required this.saved, this.size = 28, this.onTap});
++  final bool saved;
++  final double size;
++  final VoidCallback? onTap;
++
++  @override
++  Widget build(BuildContext context) {
++    return GestureDetector(
++      onTap: onTap,
++      behavior: HitTestBehavior.opaque,
++      child: Padding(
++        padding: const EdgeInsets.all(6),
++        child: saved
++            ? Container(
++                width: size,
++                height: size,
++                decoration:
++                    const BoxDecoration(color: spGreen, shape: BoxShape.circle),
++                child: Icon(Icons.check, color: Colors.black, size: size * 0.68))
++            : Icon(Icons.add_circle_outline, color: spGrey, size: size),
++      ),
++    );
++  }
++}
++
++/// Pill-shaped filter chip like Spotify's (Playlists / Albums / ...).
++class SpChip extends StatelessWidget {
++  const SpChip(this.label, {super.key, this.selected = false, this.onTap});
++  final String label;
++  final bool selected;
++  final VoidCallback? onTap;
++
++  @override
++  Widget build(BuildContext context) {
++    return GestureDetector(
++      onTap: onTap,
++      child: Container(
++        margin: const EdgeInsets.only(right: 8),
++        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
++        decoration: BoxDecoration(
++            color: selected ? spGreen : spSurface,
++            borderRadius: BorderRadius.circular(30)),
++        child: Text(label,
++            style: TextStyle(
++                fontWeight: FontWeight.w600,
++                fontSize: 14,
++                color: selected ? Colors.black : Colors.white)),
++      ),
++    );
++  }
++}
++
++/// One entry of the unified library list.
++class LibEntry {
++  LibEntry(this.kind, this.title, this.subtitle, this.item);
++  final String kind; // playlist | album | artist
++  final String title;
++  final String subtitle;
++  final dynamic item;
++
++  void open() {
++    if (kind == 'album') {
++      final a = item as Album;
++      Get.toNamed(ScreenNavigationSetup.albumScreen,
++          id: ScreenNavigationSetup.id, arguments: (a, a.browseId));
++    } else if (kind == 'artist') {
++      Get.toNamed(ScreenNavigationSetup.artistScreen,
++          id: ScreenNavigationSetup.id, arguments: [false, item as Artist]);
++    } else {
++      final p = item as Playlist;
++      Get.toNamed(ScreenNavigationSetup.playlistScreen,
++          id: ScreenNavigationSetup.id, arguments: [p, p.playlistId]);
++    }
++  }
++
++  Widget thumb(double size) {
++    if (kind == 'playlist' && (item as Playlist).playlistId == 'LIBSP_liked') {
++      return ClipRRect(
++          borderRadius: BorderRadius.circular(4), child: SpLikedCover(size));
++    }
++    final w = kind == 'artist'
++        ? ImageWidget(size: size, artist: item as Artist)
++        : kind == 'album'
++            ? ImageWidget(size: size, album: item as Album)
++            : ImageWidget(size: size, playlist: item as Playlist);
++    return kind == 'artist'
++        ? ClipOval(child: SizedBox(width: size, height: size, child: w))
++        : ClipRRect(
++            borderRadius: BorderRadius.circular(4),
++            child: SizedBox(width: size, height: size, child: w));
++  }
++}
++
++/// Builds the combined, Spotify-like library list from the three controllers.
++List<LibEntry> buildLibraryEntries() {
++  final pl = Get.find<LibraryPlaylistsController>();
++  final al = Get.find<LibraryAlbumsController>();
++  final ar = Get.find<LibraryArtistsController>();
++  final out = <LibEntry>[];
++  final playlists = pl.libraryPlaylists.toList();
++  // Liked songs first (like Spotify), then the rest of the playlists.
++  playlists.sort((a, b) {
++    int rank(Playlist p) => p.playlistId == 'LIBSP_liked' ? 0 : 1;
++    return rank(a).compareTo(rank(b));
++  });
++  for (final p in playlists) {
++    final sub = p.playlistId == 'LIBSP_liked'
++        ? 'Playlist • Spotify'
++        : p.description == 'Spotify'
++            ? 'Playlist • Spotify'
++            : 'Playlist';
++    out.add(LibEntry('playlist', p.title, sub, p));
++  }
++  for (final a in al.libraryAlbums) {
++    final artist = (a.artists != null && a.artists!.isNotEmpty)
++        ? '${a.artists![0]['name'] ?? ''}'
++        : '';
++    out.add(LibEntry('album', a.title, 'Album • $artist', a));
++  }
++  for (final a in ar.libraryArtists) {
++    out.add(LibEntry('artist', a.name, 'Artist', a));
++  }
++  return out;
++}
+diff --git a/lib/ui/widgets/spotify_web_login.dart b/lib/ui/widgets/spotify_web_login.dart
+new file mode 100644
+index 0000000..174ef3a
+--- /dev/null
++++ b/lib/ui/widgets/spotify_web_login.dart
+@@ -0,0 +1,54 @@
++import 'package:flutter/material.dart';
++import 'package:flutter_inappwebview/flutter_inappwebview.dart';
++import 'package:get/get.dart';
++
++import '../../services/spotify_service.dart';
++
++/// Full-screen Spotify login page. Pops `true` once the `sp_dc` session
++/// cookie has been captured.
++class SpotifyWebLogin extends StatefulWidget {
++  const SpotifyWebLogin({super.key});
++
++  @override
++  State<SpotifyWebLogin> createState() => _SpotifyWebLoginState();
++}
++
++class _SpotifyWebLoginState extends State<SpotifyWebLogin> {
++  bool _done = false;
++
++  Future<void> _check(Uri? url) async {
++    if (_done || url == null || url.host != 'open.spotify.com') return;
++    final cookie = await CookieManager.instance().getCookie(
++        url: WebUri('https://open.spotify.com'), name: 'sp_dc');
++    final value = cookie?.value;
++    if (value != null && value.isNotEmpty) {
++      _done = true;
++      Get.find<SpotifyService>().onLoggedIn(value);
++      if (mounted) Navigator.of(context).pop(true);
++    }
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    return Scaffold(
++      appBar: AppBar(title: const Text('Log in to Spotify')),
++      body: SafeArea(
++        child: InAppWebView(
++          initialUrlRequest: URLRequest(url: WebUri(SpotifyService.loginUrl)),
++          initialSettings: InAppWebViewSettings(
++            userAgent: SpotifyService.userAgent,
++            javaScriptEnabled: true,
++            domStorageEnabled: true,
++            thirdPartyCookiesEnabled: true,
++            javaScriptCanOpenWindowsAutomatically: true,
++          ),
++          onWebViewCreated: (_) async {
++            await CookieManager.instance().deleteAllCookies();
++          },
++          onLoadStop: (c, url) => _check(url),
++          onUpdateVisitedHistory: (c, url, _) => _check(url),
++        ),
++      ),
++    );
++  }
++}
+diff --git a/pubspec.yaml b/pubspec.yaml
+index 6cfbdfa..12dd76d 100644
+--- a/pubspec.yaml
++++ b/pubspec.yaml
+@@ -37,10 +37,12 @@ dependencies:
+   audiotags: ^1.4.1
+   buttons_tabbar: ^1.3.13
+   cached_network_image: ^3.4.0
++  crypto: ^3.0.3
+   dio: ^5.7.0
+   file_picker: ^8.0.6
+   flutter:
+     sdk: flutter
++  flutter_inappwebview: ^6.1.5
+   flutter_keyboard_visibility: ^6.0.0
+   flutter_lyric: ^2.0.4+6
+   flutter_media_metadata:
