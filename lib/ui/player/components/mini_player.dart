@@ -230,17 +230,18 @@ class MiniPlayer extends StatelessWidget {
                               isWideScreen && !bottomNavEnabled
                                   ? Container(
                                       decoration: BoxDecoration(
-                                          color: Theme.of(context)
-                                              .colorScheme
-                                              .secondary,
-                                          borderRadius:
-                                              BorderRadius.circular(10)),
+                                          color: Colors.white,
+                                          shape: BoxShape.circle),
                                       width: 58,
                                       height: 58,
                                       child: Center(
-                                          child: AnimatedPlayButton(
-                                        iconSize: isWideScreen ? 43 : 35,
-                                      )))
+                                          child: IconTheme(
+                                              data: const IconThemeData(
+                                                  color: Colors.black),
+                                              child: AnimatedPlayButton(
+                                                iconSize:
+                                                    isWideScreen ? 43 : 35,
+                                              ))))
                                   : SizedBox.square(
                                       dimension: 50,
                                       child: Center(

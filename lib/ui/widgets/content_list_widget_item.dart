@@ -29,9 +29,9 @@ class ContentListItem extends StatelessWidget {
             arguments: [content, content.playlistId]);
       },
       child: Container(
-        width: 130,
-        height: 180,
-        padding: const EdgeInsets.symmetric(horizontal: 5),
+        width: 140,
+        height: 190,
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 6),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -111,7 +111,7 @@ class ContentListItem extends StatelessWidget {
                         width: 120,
                         decoration: BoxDecoration(
                             color: Theme.of(context).primaryColorLight,
-                            borderRadius: BorderRadius.circular(10)),
+                            borderRadius: BorderRadius.circular(4)),
                         child: Center(
                             child: Icon(
                           content.playlistId == 'LIBRP'
@@ -133,7 +133,10 @@ class ContentListItem extends StatelessWidget {
                     content.title,
                     // overflow: TextOverflow.ellipsis,
                     maxLines: 2,
-                    style: Theme.of(context).textTheme.titleMedium,
+                    style: Theme.of(context)
+                        .textTheme
+                        .titleMedium!
+                        .copyWith(fontSize: 14, fontWeight: FontWeight.w700),
                   ),
                   Text(
                     isAlbum
@@ -144,7 +147,10 @@ class ContentListItem extends StatelessWidget {
                             ? ""
                             : content.description ?? "",
                     maxLines: 1,
-                    style: Theme.of(context).textTheme.titleSmall,
+                    style: Theme.of(context)
+                        .textTheme
+                        .titleSmall!
+                        .copyWith(fontSize: 13),
                   ),
                 ],
               ),

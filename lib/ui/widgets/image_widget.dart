@@ -60,7 +60,7 @@ class ImageWidget extends StatelessWidget {
       clipBehavior: Clip.antiAlias,
       decoration: BoxDecoration(
         shape: artist != null ? BoxShape.circle : BoxShape.rectangle,
-        borderRadius: artist != null ? null : BorderRadius.circular(5),
+        borderRadius: artist != null ? null : BorderRadius.circular(4),
       ),
       child: offlineAvailable
           ? Image.file(

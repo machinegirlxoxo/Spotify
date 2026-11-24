@@ -167,7 +167,7 @@ class ThemeController extends GetxController {
           //scaffoldBackgroundColor: primarySwatch[700]
           );
       return baseTheme.copyWith(
-          textTheme: GoogleFonts.interTextTheme(baseTheme.textTheme));
+          textTheme: GoogleFonts.figtreeTextTheme(baseTheme.textTheme));
     } else if (themeType == ThemeType.dark) {
       SystemChrome.setSystemUIOverlayStyle(
         SystemUiOverlayStyle(
@@ -182,63 +182,105 @@ class ThemeController extends GetxController {
       final baseTheme = ThemeData(
           useMaterial3: false,
           brightness: Brightness.dark,
-          canvasColor: Colors.black,
+          // Near-black base with lighter elevated surfaces and a green accent.
+          canvasColor: const Color(0xFF121212),
+          scaffoldBackgroundColor: const Color(0xFF121212),
+          cardColor: const Color(0xFF181818),
           primaryColor: Colors.black,
           primaryColorDark: Colors.black,
-          primaryColorLight: Colors.grey[850],
+          primaryColorLight: const Color(0xFF282828),
           colorScheme: ColorScheme.fromSwatch(
-              accentColor: Colors.grey[700], brightness: Brightness.dark),
-          progressIndicatorTheme: ProgressIndicatorThemeData(
-              color: Colors.grey[700], linearTrackColor: Colors.white),
+              accentColor: const Color(0xFF1ED760),
+              brightness: Brightness.dark),
+          progressIndicatorTheme: const ProgressIndicatorThemeData(
+              color: Color(0xFF1ED760), linearTrackColor: Colors.white),
           textTheme: const TextTheme(
               titleLarge: TextStyle(
-                fontSize: 23,
-                fontWeight: FontWeight.bold,
+                fontSize: 24,
+                fontWeight: FontWeight.w800,
+                letterSpacing: -0.5,
               ),
               titleMedium: TextStyle(
                 fontWeight: FontWeight.bold,
               ),
-              titleSmall: TextStyle(),
+              titleSmall: TextStyle(color: Color(0xFFB3B3B3)),
               labelMedium: TextStyle(
                 fontWeight: FontWeight.w800,
                 fontSize: 23,
               ),
               labelSmall: TextStyle(
                   fontSize: 15, letterSpacing: 0, fontWeight: FontWeight.bold),
-              bodyMedium: TextStyle(color: Colors.grey)),
+              bodyMedium: TextStyle(color: Color(0xFFB3B3B3))),
           navigationRailTheme: const NavigationRailThemeData(
               backgroundColor: Colors.black,
               selectedIconTheme: IconThemeData(
                 color: Colors.white,
               ),
-              unselectedIconTheme: IconThemeData(color: Colors.white38),
+              unselectedIconTheme: IconThemeData(color: Color(0xFFB3B3B3)),
               selectedLabelTextStyle: TextStyle(
                   color: Colors.white,
                   fontWeight: FontWeight.bold,
                   fontSize: 15),
               unselectedLabelTextStyle: TextStyle(
-                  color: Colors.white38, fontWeight: FontWeight.bold)),
+                  color: Color(0xFFB3B3B3), fontWeight: FontWeight.bold)),
           bottomSheetTheme: const BottomSheetThemeData(
-              backgroundColor: Colors.black, modalBarrierColor: Colors.black),
+              backgroundColor: Color(0xFF181818),
+              modalBarrierColor: Colors.black),
           sliderTheme: const SliderThemeData(
             //base bar color
-            inactiveTrackColor: Colors.white30,
+            inactiveTrackColor: Color(0xFF4D4D4D),
             //buffered progress
             activeTrackColor: Colors.white,
             //progress bar color
             valueIndicatorColor: Colors.black38,
             thumbColor: Colors.white,
           ),
-          textSelectionTheme: TextSelectionThemeData(
-              cursorColor: Colors.grey[700],
-              selectionColor: Colors.grey[700],
-              selectionHandleColor: Colors.grey[700]),
+          textSelectionTheme: const TextSelectionThemeData(
+              cursorColor: Color(0xFF1ED760),
+              selectionColor: Color(0x551ED760),
+              selectionHandleColor: Color(0xFF1ED760)),
+          dialogBackgroundColor: const Color(0xFF282828),
+          dialogTheme: DialogThemeData(
+              backgroundColor: const Color(0xFF282828),
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(8))),
+          dividerColor: const Color(0x1AFFFFFF),
+          iconTheme: const IconThemeData(color: Colors.white),
+          splashColor: Colors.transparent,
+          highlightColor: Colors.transparent,
+          chipTheme: ChipThemeData(
+              backgroundColor: const Color(0xFF2A2A2A),
+              selectedColor: const Color(0xFF1ED760),
+              labelStyle: const TextStyle(
+                  color: Colors.white, fontWeight: FontWeight.w600),
+              secondaryLabelStyle: const TextStyle(
+                  color: Colors.black, fontWeight: FontWeight.w600),
+              side: BorderSide.none,
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(50))),
+          switchTheme: SwitchThemeData(
+              thumbColor: WidgetStateProperty.resolveWith((states) =>
+                  states.contains(WidgetState.selected)
+                      ? Colors.black
+                      : const Color(0xFFB3B3B3)),
+              trackColor: WidgetStateProperty.resolveWith((states) =>
+                  states.contains(WidgetState.selected)
+                      ? const Color(0xFF1ED760)
+                      : const Color(0xFF3E3E3E))),
+          elevatedButtonTheme: ElevatedButtonThemeData(
+              style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFF1ED760),
+                  foregroundColor: Colors.black,
+                  shape: const StadiumBorder(),
+                  textStyle: const TextStyle(fontWeight: FontWeight.w700))),
+          textButtonTheme: TextButtonThemeData(
+              style: TextButton.styleFrom(foregroundColor: Colors.white)),
           inputDecorationTheme: const InputDecorationTheme(
               focusColor: Colors.white,
               focusedBorder: UnderlineInputBorder(
                   borderSide: BorderSide(color: Colors.white))));
       return baseTheme.copyWith(
-          textTheme: GoogleFonts.interTextTheme(baseTheme.textTheme));
+          textTheme: GoogleFonts.figtreeTextTheme(baseTheme.textTheme));
     } else {
       SystemChrome.setSystemUIOverlayStyle(
         SystemUiOverlayStyle(
@@ -310,7 +352,7 @@ class ThemeController extends GetxController {
               focusedBorder: UnderlineInputBorder(
                   borderSide: BorderSide(color: Colors.black))));
       return baseTheme.copyWith(
-          textTheme: GoogleFonts.interTextTheme(baseTheme.textTheme));
+          textTheme: GoogleFonts.figtreeTextTheme(baseTheme.textTheme));
     }
   }
 
