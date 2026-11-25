@@ -30,7 +30,7 @@ index e94b013..7c8b7ac 100644
      if (!offlineReplacementUrl &&
          (await Hive.openBox("SongsCache")).containsKey(songId)) {
 diff --git a/lib/services/spotify_service.dart b/lib/services/spotify_service.dart
-index 2aee6b4..f73c9b2 100644
+index 2aee6b4..db8ba0e 100644
 --- a/lib/services/spotify_service.dart
 +++ b/lib/services/spotify_service.dart
 @@ -3,6 +3,7 @@ import 'dart:convert';
@@ -80,7 +80,7 @@ index 2aee6b4..f73c9b2 100644
    final _gqlPool = _Pool(6);
    final _dbLock = _Lock();
  
-@@ -334,10 +351,23 @@ class SpotifyService extends GetxService {
+@@ -334,10 +351,22 @@ class SpotifyService extends GetxService {
          .toList();
      int ms = 0;
      ms = (data['duration']?['totalMilliseconds'] ?? data['durationMs'] ?? 0) as int;
@@ -90,8 +90,7 @@ index 2aee6b4..f73c9b2 100644
 +      final coverArt = album is Map ? album['coverArt'] : null;
 +      final sources = coverArt is Map ? coverArt['sources'] : null;
 +      if (sources is List && sources.isNotEmpty) {
-+        // prefer a medium size, fall back to whatever Spotify gives
-+        final pick = sources.length > 1 ? sources[1] : sources.first;
++        final pick = _bestSource(sources);
 +        if (pick is Map && pick['url'] is String) cover = pick['url'];
 +      }
 +    } catch (_) {}
@@ -104,7 +103,7 @@ index 2aee6b4..f73c9b2 100644
        'durationMs': ms,
        'local': '$u'.contains(':local:'),
      };
-@@ -394,8 +424,44 @@ class SpotifyService extends GetxService {
+@@ -394,8 +423,45 @@ class SpotifyService extends GetxService {
        );
  
    // --------------------------------------------------------------- import --
@@ -128,7 +127,8 @@ index 2aee6b4..f73c9b2 100644
 +      final items = images is Map ? images['items'] : null;
 +      final first = items is List && items.isNotEmpty ? items.first : null;
 +      final sources = first is Map ? first['sources'] : null;
-+      final source = sources is List && sources.isNotEmpty ? sources.first : null;
++      final source =
++          sources is List && sources.isNotEmpty ? _bestSource(sources) : null;
 +      final url = source is Map ? source['url'] : null;
 +      if (url is String) return url;
 +    } catch (_) {}
@@ -448,13 +448,13 @@ index 2aee6b4..f73c9b2 100644
 +    final l = Get.find<LibraryAlbumsController>().libraryAlbums;
 +    if (!l.any((e) => e.browseId == a.browseId)) l.add(a);
 +  }
- 
++
 +  void _pushArtist(Artist a) {
 +    if (!Get.isRegistered<LibraryArtistsController>()) return;
 +    final l = Get.find<LibraryArtistsController>().libraryArtists;
 +    if (!l.any((e) => e.browseId == a.browseId)) l.add(a);
 +  }
-+
+ 
 +  /// Bumped every time a Spotify playlist is written, so an open playlist
 +  /// screen can reload its songs while the import is still running.
 +  final playlistRevision = 0.obs;
@@ -590,7 +590,7 @@ index 2aee6b4..f73c9b2 100644
    }
  
    Future<MediaItem?> _matchTrack(Map t) async {
-@@ -582,31 +857,123 @@ class SpotifyService extends GetxService {
+@@ -582,31 +857,137 @@ class SpotifyService extends GetxService {
      }
    }
  
@@ -599,12 +599,26 @@ index 2aee6b4..f73c9b2 100644
 -        .search('$name $artist', filter: 'albums', limit: 3));
 -    final album = _firstList(res).whereType<Album>().firstOrNull;
 -    if (album == null) return;
++  /// The sharpest picture of a Spotify `sources` list (largest width; the
++  /// last entry when no widths are given).
++  dynamic _bestSource(List sources) {
++    dynamic best;
++    num bestW = -1;
++    for (final s in sources) {
++      if (s is Map && s['width'] is num && (s['width'] as num) > bestW) {
++        best = s;
++        bestW = s['width'] as num;
++      }
++    }
++    return best ?? sources.last;
++  }
++
 +  /// First image url of a Spotify `{sources: [{url}]}` object.
 +  String? _firstSource(dynamic img) {
 +    try {
 +      final sources = img is Map ? img['sources'] : null;
 +      if (sources is List && sources.isNotEmpty) {
-+        final pick = sources.length > 1 ? sources[1] : sources.first;
++        final pick = _bestSource(sources);
 +        if (pick is Map && pick['url'] is String) return pick['url'];
 +      }
 +    } catch (_) {}
@@ -631,8 +645,11 @@ index 2aee6b4..f73c9b2 100644
        await box.close();
      });
 +    return album;
-+  }
-+
+   }
+ 
+-  Future<void> _importArtist(String name) async {
+-    final res = await _matchPool.run(() =>
+-        Get.find<MusicServices>().search(name, filter: 'artists', limit: 3));
 +  /// Same for artists: added from Spotify's data, matched when opened
 +  /// ([resolveArtist]).
 +  Future<Artist?> _importArtist(_SpItem a) async {
@@ -682,11 +699,8 @@ index 2aee6b4..f73c9b2 100644
 +      if (!l.any((e) => e.browseId == real.browseId)) l.add(real);
 +    }
 +    return real;
-   }
- 
--  Future<void> _importArtist(String name) async {
--    final res = await _matchPool.run(() =>
--        Get.find<MusicServices>().search(name, filter: 'artists', limit: 3));
++  }
++
 +  /// Finds the real YouTube Music artist for an `SP:` artist, swaps it into
 +  /// the library and returns it (null when nothing matches).
 +  Future<Artist?> resolveArtist(String id) async {
@@ -795,15 +809,17 @@ index 9ade003..f6ef1ba 100644
        ),
      );
 diff --git a/lib/ui/navigator.dart b/lib/ui/navigator.dart
-index 921d2b6..6f9d966 100644
+index 921d2b6..3e1119d 100644
 --- a/lib/ui/navigator.dart
 +++ b/lib/ui/navigator.dart
-@@ -11,6 +11,32 @@ import 'screens/Playlist/playlist_screen.dart';
+@@ -11,6 +11,31 @@ import 'screens/Playlist/playlist_screen.dart';
  import 'screens/Search/search_result_screen.dart';
  import 'screens/Search/search_screen.dart';
  
 +/// Old page fades to black, then the new page fades in (no slide).
-+class FadeThroughBlackTransition extends CustomTransition {
++/// Screen change: the old screen's content fades out, then the new content
++/// fades in. Nothing is painted on top, so there is no black flash.
++class ContentFadeTransition extends CustomTransition {
 +  @override
 +  Widget buildTransition(
 +      BuildContext context,
@@ -814,16 +830,13 @@ index 921d2b6..6f9d966 100644
 +      Widget child) {
 +    final fadeIn = CurvedAnimation(
 +        parent: animation,
-+        curve: const Interval(0.5, 1.0, curve: Curves.easeOut));
++        curve: const Interval(0.4, 1.0, curve: Curves.easeOut));
 +    final fadeOut = ReverseAnimation(CurvedAnimation(
 +        parent: secondaryAnimation,
-+        curve: const Interval(0.0, 0.5, curve: Curves.easeIn)));
++        curve: const Interval(0.0, 0.6, curve: Curves.easeIn)));
 +    return FadeTransition(
 +      opacity: fadeIn,
-+      child: ColoredBox(
-+        color: Colors.black,
-+        child: FadeTransition(opacity: fadeOut, child: child),
-+      ),
++      child: FadeTransition(opacity: fadeOut, child: child),
 +    );
 +  }
 +}
@@ -831,61 +844,61 @@ index 921d2b6..6f9d966 100644
  class ScreenNavigationSetup {
    ScreenNavigationSetup._();
  
-@@ -37,7 +63,9 @@ class ScreenNavigation extends StatelessWidget {
+@@ -37,7 +62,9 @@ class ScreenNavigation extends StatelessWidget {
  
              case ScreenNavigationSetup.homeScreen:
                return GetPageRoute(
 -                  page: () => const HomeScreen(), settings: settings);
 +                  page: () => const HomeScreen(), settings: settings,
-+                  customTransition: FadeThroughBlackTransition(),
-+                  transitionDuration: const Duration(milliseconds: 180));
++                  customTransition: ContentFadeTransition(),
++                  transitionDuration: const Duration(milliseconds: 220));
              
              case ScreenNavigationSetup.albumScreen:
                final id = (settings.arguments as (Album?, String)).$2;
-@@ -45,7 +73,9 @@ class ScreenNavigation extends StatelessWidget {
+@@ -45,7 +72,9 @@ class ScreenNavigation extends StatelessWidget {
                    page: () => AlbumScreen(
                          key: Key(id),
                        ),
 -                  settings: settings);
 +                  settings: settings,
-+                  customTransition: FadeThroughBlackTransition(),
-+                  transitionDuration: const Duration(milliseconds: 180));
++                  customTransition: ContentFadeTransition(),
++                  transitionDuration: const Duration(milliseconds: 220));
              
              case ScreenNavigationSetup.playlistScreen:
               final id = (settings.arguments as List)[1] as String;
-@@ -53,15 +83,21 @@ class ScreenNavigation extends StatelessWidget {
+@@ -53,15 +82,21 @@ class ScreenNavigation extends StatelessWidget {
                    page: () => PlaylistScreen(
                          key: Key(id),
                        ),
 -                  settings: settings);
 +                  settings: settings,
-+                  customTransition: FadeThroughBlackTransition(),
-+                  transitionDuration: const Duration(milliseconds: 180));
++                  customTransition: ContentFadeTransition(),
++                  transitionDuration: const Duration(milliseconds: 220));
              
              case ScreenNavigationSetup.searchScreen:
                return GetPageRoute(
 -                  page: () => const SearchScreen(), settings: settings);
 +                  page: () => const SearchScreen(), settings: settings,
-+                  customTransition: FadeThroughBlackTransition(),
-+                  transitionDuration: const Duration(milliseconds: 180));
++                  customTransition: ContentFadeTransition(),
++                  transitionDuration: const Duration(milliseconds: 220));
              
              case ScreenNavigationSetup.searchResultScreen:
                return GetPageRoute(
 -                  page: () => const SearchResultScreen(), settings: settings);
 +                  page: () => const SearchResultScreen(), settings: settings,
-+                  customTransition: FadeThroughBlackTransition(),
-+                  transitionDuration: const Duration(milliseconds: 180));
++                  customTransition: ContentFadeTransition(),
++                  transitionDuration: const Duration(milliseconds: 220));
              
              case ScreenNavigationSetup.artistScreen:
                final args = settings.arguments as List;
-@@ -70,7 +106,9 @@ class ScreenNavigation extends StatelessWidget {
+@@ -70,7 +105,9 @@ class ScreenNavigation extends StatelessWidget {
                    page: () => ArtistScreen(
                          key: Key(id),
                        ),
 -                  settings: settings);
 +                  settings: settings,
-+                  customTransition: FadeThroughBlackTransition(),
-+                  transitionDuration: const Duration(milliseconds: 180));
++                  customTransition: ContentFadeTransition(),
++                  transitionDuration: const Duration(milliseconds: 220));
              
              default:
                return null;
@@ -1765,8 +1778,48 @@ index 6a98ac5..1d9ab83 100644
      }
    }
  
+diff --git a/lib/ui/screens/Artists/artist_screen.dart b/lib/ui/screens/Artists/artist_screen.dart
+index c52ae40..1552a63 100644
+--- a/lib/ui/screens/Artists/artist_screen.dart
++++ b/lib/ui/screens/Artists/artist_screen.dart
+@@ -73,7 +73,6 @@ class ArtistScreen extends StatelessWidget {
+                           destinations: [
+                             "about".tr,
+                             "songs".tr,
+-                            "videos".tr,
+                             "albums".tr,
+                             "singles".tr
+                           ].map((e) => railDestination(e)).toList(),
+@@ -163,7 +162,7 @@ class Body extends StatelessWidget {
+     } else {
+       final separatedContent = artistScreenController.sepataredContent;
+       final currentTabName =
+-          ["About", "Songs", "Videos", "Albums", "Singles"][tabIndex];
++          ["About", "Songs", "Albums", "Singles"][tabIndex];
+       return Obx(() {
+         if (artistScreenController.isSeparatedArtistContentFetced.isFalse &&
+             artistScreenController.navigationRailCurrentIndex.value != 0) {
+@@ -179,13 +178,11 @@ class Body extends StatelessWidget {
+           topPadding: context.isLandscape ? 50.0 : 80.0,
+           scrollController: currentTabName == "Songs"
+               ? artistScreenController.songScrollController
+-              : currentTabName == "Videos"
+-                  ? artistScreenController.videoScrollController
+-                  : currentTabName == "Albums"
+-                      ? artistScreenController.albumScrollController
+-                      : currentTabName == "Singles"
+-                          ? artistScreenController.singlesScrollController
+-                          : null,
++              : currentTabName == "Albums"
++                  ? artistScreenController.albumScrollController
++                  : currentTabName == "Singles"
++                      ? artistScreenController.singlesScrollController
++                      : null,
+         );
+       });
+     }
 diff --git a/lib/ui/screens/Artists/artist_screen_controller.dart b/lib/ui/screens/Artists/artist_screen_controller.dart
-index cf2e48a..3a46856 100644
+index cf2e48a..669dd92 100644
 --- a/lib/ui/screens/Artists/artist_screen_controller.dart
 +++ b/lib/ui/screens/Artists/artist_screen_controller.dart
 @@ -9,6 +9,7 @@ import '../../../models/artist.dart';
@@ -1777,6 +1830,15 @@ index cf2e48a..3a46856 100644
  import '/ui/screens/Home/home_screen_controller.dart';
  import '/ui/screens/Settings/settings_screen_controller.dart';
  
+@@ -40,7 +41,7 @@ class ArtistScreenController extends GetxController
+     _init(args[0], args[1]);
+     if (GetPlatform.isDesktop ||
+         Get.find<SettingsScreenController>().isBottomNavBarEnabled.isTrue) {
+-      tabController = TabController(vsync: this, length: 5);
++      tabController = TabController(vsync: this, length: 4);
+       tabController?.animation?.addListener(() {
+         int indexChange = tabController!.offset.round();
+         int index = tabController!.index + indexChange;
 @@ -60,8 +61,19 @@ class ArtistScreenController extends GetxController
      super.onReady();
    }
@@ -1798,23 +1860,125 @@ index cf2e48a..3a46856 100644
      _fetchArtistContent(isIdOnly ? artist as String : artist.browseId);
      _checkIfAddedToLibrary(isIdOnly ? artist as String : artist.browseId);
    }
+@@ -106,7 +118,7 @@ class ArtistScreenController extends GetxController
+   Future<void> onDestinationSelected(int val) async {
+     isTabTransitionReversed = val > navigationRailCurrentIndex.value;
+     navigationRailCurrentIndex.value = val;
+-    final tabName = ["About", "Songs", "Videos", "Albums", "Singles"][val];
++    final tabName = ["About", "Songs", "Albums", "Singles"][val];
+ 
+     //cancel additional operations in case of tab change
+     if (sortWidgetController != null) {
+@@ -138,10 +150,8 @@ class ArtistScreenController extends GetxController
+     final scrollController = val == 1
+         ? songScrollController
+         : val == 2
+-            ? videoScrollController
+-            : val == 3
+-                ? albumScrollController
+-                : singlesScrollController;
++            ? albumScrollController
++            : singlesScrollController;
+ 
+     scrollController.addListener(() {
+       double maxScroll = scrollController.position.maxScrollExtent;
+@@ -218,7 +228,6 @@ class ArtistScreenController extends GetxController
+     final tabName = [
+       "About",
+       "Songs",
+-      "Videos",
+       "Albums",
+       "Singles"
+     ][navigationRailCurrentIndex.value];
+diff --git a/lib/ui/screens/Artists/artist_screen_v2.dart b/lib/ui/screens/Artists/artist_screen_v2.dart
+index 58b1471..ef1acff 100644
+--- a/lib/ui/screens/Artists/artist_screen_v2.dart
++++ b/lib/ui/screens/Artists/artist_screen_v2.dart
+@@ -35,7 +35,7 @@ class ArtistScreenBN extends StatelessWidget {
+             controller: artistScreenController.tabController!,
+             onTap: artistScreenController.onDestinationSelected,
+             tabs:
+-                ["about".tr, "songs".tr, "videos".tr, "albums".tr, "singles".tr]
++                ["about".tr, "songs".tr, "albums".tr, "singles".tr]
+                     .map((e) => Tab(
+                           text: e,
+                         ))
+@@ -55,7 +55,7 @@ class ArtistScreenBN extends StatelessWidget {
+           controller: artistScreenController.tabController,
+           children: artistScreenController.isArtistContentFetced.isFalse
+               ? List.generate(
+-                  5,
++                  4,
+                   (index) => const Center(
+                         child: LoadingIndicator(),
+                       ))
+@@ -65,7 +65,7 @@ class ArtistScreenBN extends StatelessWidget {
+                     padding: const EdgeInsets.only(
+                         top: 10, left: 15, right: 5, bottom: 200),
+                   ),
+-                  ...["Songs", "Videos", "Albums", "Singles"].map(
++                  ...["Songs", "Albums", "Singles"].map(
+                     (item) {
+                       if (artistScreenController
+                               .isSeparatedArtistContentFetced.isFalse &&
+@@ -86,15 +86,12 @@ class ArtistScreenBN extends StatelessWidget {
+                           title: item,
+                           scrollController: item == "Songs"
+                               ? artistScreenController.songScrollController
+-                              : item == "Videos"
+-                                  ? artistScreenController.videoScrollController
+-                                  : item == "Albums"
++                              : item == "Albums"
++                                  ? artistScreenController.albumScrollController
++                                  : item == "Singles"
+                                       ? artistScreenController
+-                                          .albumScrollController
+-                                      : item == "Singles"
+-                                          ? artistScreenController
+-                                              .singlesScrollController
+-                                          : null,
++                                          .singlesScrollController
++                                      : null,
+                         ),
+                       );
+                     },
 diff --git a/lib/ui/screens/Home/home_screen_controller.dart b/lib/ui/screens/Home/home_screen_controller.dart
-index 225919c..4109e35 100644
+index 225919c..8b6168a 100644
 --- a/lib/ui/screens/Home/home_screen_controller.dart
 +++ b/lib/ui/screens/Home/home_screen_controller.dart
-@@ -1,5 +1,7 @@
+@@ -1,5 +1,8 @@
  import 'package:audio_service/audio_service.dart';
  import 'package:flutter/material.dart';
 +import '../../widgets/library_search_overlay.dart';
++import '../../navigator.dart';
 +import '../Search/search_screen_controller.dart';
  import 'package:get/get.dart';
  import 'package:hive/hive.dart';
  
-@@ -257,11 +259,19 @@ class HomeScreenController extends GetxController {
+@@ -89,6 +92,7 @@ class HomeScreenController extends GetxController {
+   Future<void> loadContentFromNetwork({bool silent = false}) async {
+     final box = Hive.box("AppPrefs");
+     String contentType = box.get("discoverContentType") ?? "QP";
++    if (contentType == "TMV") contentType = "TR"; // videos were removed
+ 
+     networkError.value = false;
+     try {
+@@ -256,12 +260,31 @@ class HomeScreenController extends GetxController {
+     return unsupportedLangIds.contains(userLangId) ? "en" : userLangId;
    }
  
++  /// Pressing a tab in the navigation bar always brings that tab back to its
++  /// first screen: every album / playlist / artist / search-result page that
++  /// was opened on top of it is closed.
++  void _backToTabRoot() {
++    final nav = Get.nestedKey(ScreenNavigationSetup.id)?.currentState;
++    nav?.popUntil((route) =>
++        route.isFirst || route.settings.name == ScreenNavigationSetup.homeScreen);
++  }
++
    void onSideBarTabSelected(int index) {
 +    LibrarySearchOverlay.close();
++    _backToTabRoot();
 +    if (Get.isRegistered<SearchScreenController>()) {
 +      Get.find<SearchScreenController>().resetToLanding();
 +    }
@@ -1824,6 +1988,7 @@ index 225919c..4109e35 100644
  
    void onBottonBarTabSelected(int index) {
 +    LibrarySearchOverlay.close();
++    _backToTabRoot();
 +    if (Get.isRegistered<SearchScreenController>()) {
 +      Get.find<SearchScreenController>().resetToLanding();
 +    }
@@ -3149,10 +3314,10 @@ index bf116b9..a2374c3 100644
      Get.find<HomeScreenController>().whenHomeScreenOnTop();
 diff --git a/lib/ui/screens/Search/components/search_song_tile.dart b/lib/ui/screens/Search/components/search_song_tile.dart
 new file mode 100644
-index 0000000..7748419
+index 0000000..94c39ee
 --- /dev/null
 +++ b/lib/ui/screens/Search/components/search_song_tile.dart
-@@ -0,0 +1,134 @@
+@@ -0,0 +1,140 @@
 +import 'package:audio_service/audio_service.dart';
 +import 'package:flutter/material.dart';
 +import 'package:get/get.dart';
@@ -3220,7 +3385,12 @@ index 0000000..7748419
 +    final song = widget.song;
 +    final textTheme = Theme.of(context).textTheme;
 +    return ListTile(
-+      contentPadding: const EdgeInsets.only(left: 10, right: 4),
++      // same row as the playlist songs: 48dp art, 16dp inset, 12dp gap
++      contentPadding: const EdgeInsets.only(left: 16, right: 4),
++      dense: true,
++      visualDensity: VisualDensity.standard,
++      horizontalTitleGap: 12,
++      minVerticalPadding: 0,
 +      onTap: () {
 +        widget.onPlayed?.call();
 +        final index = widget.queue.indexWhere((e) => e.id == song.id);
@@ -3229,20 +3399,21 @@ index 0000000..7748419
 +            playfrom: PlaylingFrom(
 +                name: "search".tr, type: PlaylingFromType.SELECTION));
 +      },
-+      leading: ImageWidget(size: 55, song: song),
++      leading: ImageWidget(size: 48, song: song),
 +      title: Obx(() {
 +        final playing = player.currentSong.value?.id == song.id;
 +        return Text(song.title,
 +            maxLines: 1,
 +            overflow: TextOverflow.ellipsis,
 +            style: textTheme.titleMedium!.copyWith(
++                fontSize: 16,
 +                color: playing ? _green : null,
-+                fontWeight: playing ? FontWeight.w700 : null));
++                fontWeight: playing ? FontWeight.w700 : FontWeight.w400));
 +      }),
 +      subtitle: Text("Song • ${song.artist ?? ""}",
 +          maxLines: 1,
 +          overflow: TextOverflow.ellipsis,
-+          style: textTheme.titleSmall),
++          style: textTheme.titleSmall!.copyWith(fontSize: 14)),
 +      trailing: Row(mainAxisSize: MainAxisSize.min, children: [
 +        if (widget.onRemove == null)
 +        IconButton(
@@ -3287,6 +3458,696 @@ index 0000000..7748419
 +    );
 +  }
 +}
+diff --git a/lib/ui/screens/Search/search_result_screen_controller.dart b/lib/ui/screens/Search/search_result_screen_controller.dart
+index 74d316e..eda5917 100644
+--- a/lib/ui/screens/Search/search_result_screen_controller.dart
++++ b/lib/ui/screens/Search/search_result_screen_controller.dart
+@@ -99,7 +99,6 @@ class SearchResultScreenController extends GetxController
+       resultContent.value = await musicServices.search(args);
+       final allKeys = resultContent.keys.where((element) => ([
+             "Songs",
+-            "Videos",
+             "Albums",
+             "Featured playlists",
+             "Community playlists",
+diff --git a/lib/ui/screens/Search/search_result_screen_v2.dart b/lib/ui/screens/Search/search_result_screen_v2.dart
+index 7978675..c1d4cff 100644
+--- a/lib/ui/screens/Search/search_result_screen_v2.dart
++++ b/lib/ui/screens/Search/search_result_screen_v2.dart
+@@ -1,179 +1,513 @@
+-import 'package:buttons_tabbar/buttons_tabbar.dart';
++import 'package:audio_service/audio_service.dart';
+ import 'package:flutter/material.dart';
+ import 'package:get/get.dart';
+-import 'package:harmonymusic/ui/widgets/loader.dart';
+-import 'package:harmonymusic/ui/widgets/search_related_widgets.dart';
++import 'package:hive/hive.dart';
+ 
++import '../../../models/album.dart';
++import '../../../models/artist.dart';
++import '../../../models/playlist.dart';
+ import '../../navigator.dart';
+-import '../../widgets/separate_tab_item_widget.dart';
++import '../../widgets/image_widget.dart';
++import '../../widgets/loader.dart';
++import '../Library/library_controller.dart';
++import 'components/search_song_tile.dart';
+ import 'search_result_screen_controller.dart';
++import 'search_screen_controller.dart';
+ 
++const _spGreen = Color(0xFF1ED760);
++const _spChip = Color(0xFF2A2A2A);
++const _spGrey = Color(0xFFB3B3B3);
++
++/// Search results laid out like Spotify: top bar (back / query / clear),
++/// filter chips, a top artist row, a "Featuring" playlist carousel and the
++/// song list. Tapping a chip shows only that kind of result.
+ class SearchResultScreenBN extends StatelessWidget {
+   const SearchResultScreenBN({super.key});
+ 
++  static String _chipLabel(String key) {
++    switch (key) {
++      case 'Featured playlists':
++        return 'Playlists';
++      default:
++        return key;
++    }
++  }
++
++  void _back() {
++    Get.nestedKey(ScreenNavigationSetup.id)!.currentState!.pop();
++  }
++
+   @override
+   Widget build(BuildContext context) {
+-    final SearchResultScreenController searchResScrController =
+-        Get.find<SearchResultScreenController>();
+-    final topPadding = context.isLandscape ? 50.0 : 80.0;
++    final c = Get.find<SearchResultScreenController>();
++    final theme = Theme.of(context);
+     return Scaffold(
+-      body: Padding(
+-          padding: EdgeInsets.only(
+-            top: topPadding,
+-          ),
+-          child: Column(
+-            children: [
+-              Row(
+-                children: [
+-                  SizedBox(
+-                    width: 55,
+-                    child: Center(
+-                      child: IconButton(
+-                        onPressed: () {
+-                          Get.nestedKey(ScreenNavigationSetup.id)!
+-                              .currentState!
+-                              .pop();
+-                        },
+-                        icon: const Icon(Icons.arrow_back_ios_new),
+-                      ),
+-                    ),
++      body: Column(
++        children: [
++          // top bar: arrow + query + clear (same look as the search page)
++          Container(
++            color: Color.lerp(theme.canvasColor, Colors.white, 0.1),
++            padding: EdgeInsets.only(top: MediaQuery.of(context).padding.top),
++            child: SizedBox(
++              height: 64,
++              child: Row(children: [
++                IconButton(
++                    icon: const Icon(Icons.arrow_back), onPressed: _back),
++                Expanded(
++                  child: GestureDetector(
++                    behavior: HitTestBehavior.opaque,
++                    onTap: _back,
++                    child: Obx(() => Text(c.queryString.value,
++                        maxLines: 1,
++                        overflow: TextOverflow.ellipsis,
++                        style: theme.textTheme.titleLarge!.copyWith(
++                            fontSize: 22, fontWeight: FontWeight.w500))),
+                   ),
+-                  Expanded(
+-                      child: Column(children: [
+-                    Align(
+-                      alignment: Alignment.centerLeft,
+-                      child: Text(
+-                        "searchRes".tr,
+-                        style: Theme.of(context).textTheme.titleLarge,
+-                      ),
+-                    ),
+-                    Align(
+-                      alignment: Alignment.centerLeft,
+-                      child: Obx(
+-                        () => Text(
+-                          "${"for1".tr} \"${searchResScrController.queryString.value}\"",
+-                          style: Theme.of(context).textTheme.titleMedium,
+-                        ),
+-                      ),
+-                    ),
+-                  ]))
+-                ],
+-              ),
+-              Expanded(
+-                child: Obx(
+-                  () {
+-                    if (searchResScrController.isResultContentFetced.isTrue &&
+-                        searchResScrController.railItems.isEmpty) {
+-                      return Center(
+-                        child: Column(
+-                          mainAxisAlignment: MainAxisAlignment.center,
+-                          children: [
+-                            Text(
+-                              "nomatch".tr,
+-                              style: Theme.of(context).textTheme.titleMedium,
+-                            ),
+-                            Text(
+-                                "'${searchResScrController.queryString.value}'"),
+-                          ],
+-                        ),
+-                      );
+-                    } else if (searchResScrController
+-                        .isResultContentFetced.isTrue) {
+-                      return Column(
+-                        crossAxisAlignment: CrossAxisAlignment.start,
+-                        children: <Widget>[
+-                          Padding(
+-                            padding: const EdgeInsets.only(left: 15.0, top: 10),
+-                            child: ButtonsTabBar(
+-                              onTap:
+-                                  searchResScrController.onDestinationSelected,
+-
+-                              controller: searchResScrController.tabController,
+-                              contentPadding:
+-                                  const EdgeInsets.only(left: 15, right: 15),
+-                              backgroundColor: Theme.of(context)
+-                                  .textTheme
+-                                  .titleMedium
+-                                  ?.color!,
+-                              unselectedBackgroundColor:
+-                                  Theme.of(context).colorScheme.secondary,
+-                              borderWidth: 0,
+-                              buttonMargin: const EdgeInsets.only(
+-                                  right: 10, left: 4, top: 4, bottom: 4),
+-                              borderColor: Colors.black,
+-                              labelStyle: TextStyle(
+-                                color: Theme.of(context).primaryColor,
+-                                fontWeight: FontWeight.bold,
+-                              ),
+-                              unselectedLabelStyle: TextStyle(
+-                                color: Theme.of(context)
+-                                    .textTheme
+-                                    .titleMedium
+-                                    ?.color!,
+-                                fontWeight: FontWeight.bold,
+-                              ),
+-                              // Add your tabs here
+-                              tabs: [
+-                                Tab(text: "results".tr),
+-                                ...searchResScrController.railItems
+-                                    .map((item) => Tab(
+-                                          text: item
+-                                              .toLowerCase()
+-                                              .removeAllWhitespace
+-                                              .tr,
+-                                        ))
+-                              ],
+-                            ),
+-                          ),
+-                          Expanded(
+-                            child: Padding(
+-                              padding: const EdgeInsets.only(left: 15.0),
+-                              child: TabBarView(
+-                                controller:
+-                                    searchResScrController.tabController,
+-                                children: [
+-                                  const ResultWidget(
+-                                    isv2Used: true,
+-                                  ),
+-                                  ...searchResScrController.railItems
+-                                      .map((tabName) {
+-                                    if (tabName == "Songs" ||
+-                                        tabName == "Videos") {
+-                                      return SeparateTabItemWidget(
+-                                        isResultWidget: true,
+-                                        hideTitle: true,
+-                                        items: const [],
+-                                        title: tabName,
+-                                        isCompleteList: true,
+-                                        scrollController: searchResScrController
+-                                            .scrollControllers[tabName],
+-                                      );
+-                                    } else {
+-                                      return SeparateTabItemWidget(
+-                                        title: tabName,
+-                                        hideTitle: true,
+-                                        items: const [],
+-                                        scrollController: searchResScrController
+-                                            .scrollControllers[tabName],
+-                                      );
+-                                    }
+-                                  }),
+-                                ],
+-                              ),
+-                            ),
+-                          ),
+-                        ],
+-                      );
+-                    } else {
+-                      return const Center(
+-                        child: LoadingIndicator(),
+-                      );
++                ),
++                IconButton(
++                  icon: const Icon(Icons.close),
++                  onPressed: () {
++                    if (Get.isRegistered<SearchScreenController>()) {
++                      Get.find<SearchScreenController>().reset();
+                     }
++                    _back();
+                   },
+                 ),
+-              )
+-            ],
+-          )),
++              ]),
++            ),
++          ),
++          Expanded(
++            child: Obx(() {
++              if (c.isResultContentFetced.isFalse) {
++                return const Center(child: LoadingIndicator());
++              }
++              if (c.railItems.isEmpty) {
++                return Center(
++                  child: Text("${"nomatch".tr}\n'${c.queryString.value}'",
++                      textAlign: TextAlign.center,
++                      style: theme.textTheme.titleMedium),
++                );
++              }
++              final selected = c.navigationRailCurrentIndex.value; // 0 = all
++              return Column(
++                crossAxisAlignment: CrossAxisAlignment.start,
++                children: [
++                  _chips(c, selected),
++                  Expanded(
++                    child: selected == 0
++                        ? _AllResults(c: c)
++                        : _CategoryList(
++                            c: c, tabName: c.railItems[selected - 1]),
++                  ),
++                ],
++              );
++            }),
++          ),
++        ],
++      ),
++    );
++  }
++
++  Widget _chips(SearchResultScreenController c, int selected) {
++    // Songs, Artists, Albums first, playlists after
++    const order = [
++      'Songs',
++      'Artists',
++      'Albums',
++      'Featured playlists',
++      'Community playlists'
++    ];
++    final items = c.railItems.toList()
++      ..sort((a, b) => order.indexOf(a).compareTo(order.indexOf(b)));
++    return SizedBox(
++      height: 64,
++      child: ListView.separated(
++        scrollDirection: Axis.horizontal,
++        padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
++        itemCount: items.length,
++        separatorBuilder: (_, __) => const SizedBox(width: 8),
++        itemBuilder: (context, i) {
++          final key = items[i];
++          final index = c.railItems.indexOf(key) + 1;
++          final active = selected == index;
++          return GestureDetector(
++            onTap: () => c.onDestinationSelected(active ? 0 : index,
++                ignoreTabCommand: true),
++            child: Container(
++              alignment: Alignment.center,
++              padding: const EdgeInsets.symmetric(horizontal: 18),
++              decoration: BoxDecoration(
++                  color: active ? _spGreen : _spChip,
++                  borderRadius: BorderRadius.circular(20)),
++              child: Text(_chipLabel(key),
++                  style: TextStyle(
++                      color: active ? Colors.black : Colors.white,
++                      fontSize: 15,
++                      fontWeight: FontWeight.w500)),
++            ),
++          );
++        },
++      ),
++    );
++  }
++}
++
++// ------------------------------------------------------------- all results --
++
++class _AllResults extends StatelessWidget {
++  const _AllResults({required this.c});
++  final SearchResultScreenController c;
++
++  List<T> _list<T>(String key) {
++    final v = c.resultContent[key];
++    return v is List ? List<T>.from(v.whereType<T>()) : <T>[];
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    final songs = _list<MediaItem>('Songs');
++    final artists = _list<Artist>('Artists');
++    final albums = _list<Album>('Albums');
++    var playlists = _list<Playlist>('Featured playlists');
++    if (playlists.isEmpty) playlists = _list<Playlist>('Community playlists');
++    final top = artists.isNotEmpty ? artists.first : null;
++    final titleStyle = Theme.of(context)
++        .textTheme
++        .titleLarge!
++        .copyWith(fontSize: 24, fontWeight: FontWeight.w800);
++
++    return ListView(
++      padding: const EdgeInsets.only(bottom: 200),
++      physics:
++          const BouncingScrollPhysics(parent: AlwaysScrollableScrollPhysics()),
++      children: [
++        if (top != null) _TopArtist(artist: top),
++        if (playlists.isNotEmpty) ...[
++          Padding(
++            padding: const EdgeInsets.fromLTRB(16, 20, 16, 12),
++            child: Text(top != null ? "Featuring ${top.name}" : "Playlists",
++                style: titleStyle),
++          ),
++          SizedBox(
++            height: 232,
++            child: ListView.separated(
++              scrollDirection: Axis.horizontal,
++              padding: const EdgeInsets.symmetric(horizontal: 16),
++              itemCount: playlists.length,
++              separatorBuilder: (_, __) => const SizedBox(width: 14),
++              itemBuilder: (_, i) => _PlaylistCard(playlist: playlists[i]),
++            ),
++          ),
++        ],
++        if (songs.isNotEmpty) const SizedBox(height: 14),
++        ...songs.map((s) => SearchSongTile(
++            key: ValueKey("res_${s.id}"), song: s, queue: songs)),
++        if (artists.length > 1) ...[
++          Padding(
++            padding: const EdgeInsets.fromLTRB(16, 24, 16, 12),
++            child: Text("Artists", style: titleStyle),
++          ),
++          SizedBox(
++            height: 160,
++            child: ListView.separated(
++              scrollDirection: Axis.horizontal,
++              padding: const EdgeInsets.symmetric(horizontal: 16),
++              itemCount: artists.length - 1,
++              separatorBuilder: (_, __) => const SizedBox(width: 14),
++              itemBuilder: (_, i) => _ArtistCard(artist: artists[i + 1]),
++            ),
++          ),
++        ],
++        if (albums.isNotEmpty) ...[
++          Padding(
++            padding: const EdgeInsets.fromLTRB(16, 24, 16, 12),
++            child: Text("Albums", style: titleStyle),
++          ),
++          SizedBox(
++            height: 232,
++            child: ListView.separated(
++              scrollDirection: Axis.horizontal,
++              padding: const EdgeInsets.symmetric(horizontal: 16),
++              itemCount: albums.length,
++              separatorBuilder: (_, __) => const SizedBox(width: 14),
++              itemBuilder: (_, i) => _AlbumCard(album: albums[i]),
++            ),
++          ),
++        ],
++      ],
++    );
++  }
++}
++
++void _openArtist(Artist a) => Get.toNamed(ScreenNavigationSetup.artistScreen,
++    id: ScreenNavigationSetup.id, arguments: [false, a]);
++
++void _openAlbum(Album a) => Get.toNamed(ScreenNavigationSetup.albumScreen,
++    id: ScreenNavigationSetup.id, arguments: (a, a.browseId));
++
++void _openPlaylist(Playlist p) => Get.toNamed(
++    ScreenNavigationSetup.playlistScreen,
++    id: ScreenNavigationSetup.id,
++    arguments: [p, p.playlistId]);
++
++String _albumArtist(Album a) {
++  final list = a.artists;
++  if (list == null || list.isEmpty) return '';
++  return '${list.first['name'] ?? ''}';
++}
++
++/// Round avatar + name + "Artist" + Follow / Following button.
++class _TopArtist extends StatefulWidget {
++  const _TopArtist({required this.artist});
++  final Artist artist;
++
++  @override
++  State<_TopArtist> createState() => _TopArtistState();
++}
++
++class _TopArtistState extends State<_TopArtist> {
++  bool _following = false;
++
++  @override
++  void initState() {
++    super.initState();
++    _load();
++  }
++
++  Future<void> _load() async {
++    final box = await Hive.openBox("LibraryArtists");
++    if (mounted) {
++      setState(() => _following = box.containsKey(widget.artist.browseId));
++    }
++  }
++
++  Future<void> _toggle() async {
++    final box = await Hive.openBox("LibraryArtists");
++    if (_following) {
++      await box.delete(widget.artist.browseId);
++    } else {
++      await box.put(widget.artist.browseId, widget.artist.toJson());
++    }
++    if (Get.isRegistered<LibraryArtistsController>()) {
++      Get.find<LibraryArtistsController>().refreshLib();
++    }
++    if (mounted) setState(() => _following = !_following);
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    final a = widget.artist;
++    return InkWell(
++      onTap: () => _openArtist(a),
++      child: Padding(
++        padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
++        child: Row(children: [
++          ImageWidget(size: 66, artist: a),
++          const SizedBox(width: 14),
++          Expanded(
++            child: Column(
++              crossAxisAlignment: CrossAxisAlignment.start,
++              children: [
++                Text(a.name,
++                    maxLines: 1,
++                    overflow: TextOverflow.ellipsis,
++                    style: Theme.of(context)
++                        .textTheme
++                        .titleLarge!
++                        .copyWith(fontSize: 20, fontWeight: FontWeight.w600)),
++                const SizedBox(height: 2),
++                const Text("Artist",
++                    style: TextStyle(color: _spGrey, fontSize: 15)),
++              ],
++            ),
++          ),
++          OutlinedButton(
++            onPressed: _toggle,
++            style: OutlinedButton.styleFrom(
++              foregroundColor: Colors.white,
++              side: BorderSide(
++                  color: _following ? Colors.white : _spGrey, width: 1.2),
++              shape: RoundedRectangleBorder(
++                  borderRadius: BorderRadius.circular(22)),
++              padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
++            ),
++            child: Text(_following ? "Following" : "Follow",
++                style:
++                    const TextStyle(fontSize: 15, fontWeight: FontWeight.w700)),
++          ),
++        ]),
++      ),
++    );
++  }
++}
++
++class _PlaylistCard extends StatelessWidget {
++  const _PlaylistCard({required this.playlist});
++  final Playlist playlist;
++
++  @override
++  Widget build(BuildContext context) {
++    return GestureDetector(
++      onTap: () => _openPlaylist(playlist),
++      child: SizedBox(
++        width: 170,
++        child: Column(
++          crossAxisAlignment: CrossAxisAlignment.start,
++          children: [
++            ImageWidget(size: 170, playlist: playlist, squareCorners: true),
++            const SizedBox(height: 8),
++            Text(playlist.title,
++                maxLines: 2,
++                overflow: TextOverflow.ellipsis,
++                style: Theme.of(context)
++                    .textTheme
++                    .titleMedium!
++                    .copyWith(fontWeight: FontWeight.w700, fontSize: 16)),
++          ],
++        ),
++      ),
++    );
++  }
++}
++
++class _AlbumCard extends StatelessWidget {
++  const _AlbumCard({required this.album});
++  final Album album;
++
++  @override
++  Widget build(BuildContext context) {
++    return GestureDetector(
++      onTap: () => _openAlbum(album),
++      child: SizedBox(
++        width: 170,
++        child: Column(
++          crossAxisAlignment: CrossAxisAlignment.start,
++          children: [
++            ImageWidget(size: 170, album: album, squareCorners: true),
++            const SizedBox(height: 8),
++            Text(album.title,
++                maxLines: 1,
++                overflow: TextOverflow.ellipsis,
++                style: Theme.of(context)
++                    .textTheme
++                    .titleMedium!
++                    .copyWith(fontWeight: FontWeight.w700, fontSize: 16)),
++            Text("Album • ${_albumArtist(album)}",
++                maxLines: 1,
++                overflow: TextOverflow.ellipsis,
++                style: const TextStyle(color: _spGrey, fontSize: 14)),
++          ],
++        ),
++      ),
++    );
++  }
++}
++
++class _ArtistCard extends StatelessWidget {
++  const _ArtistCard({required this.artist});
++  final Artist artist;
++
++  @override
++  Widget build(BuildContext context) {
++    return GestureDetector(
++      onTap: () => _openArtist(artist),
++      child: SizedBox(
++        width: 110,
++        child: Column(children: [
++          ImageWidget(size: 110, artist: artist),
++          const SizedBox(height: 8),
++          Text(artist.name,
++              maxLines: 1,
++              textAlign: TextAlign.center,
++              overflow: TextOverflow.ellipsis,
++              style: Theme.of(context)
++                  .textTheme
++                  .titleMedium!
++                  .copyWith(fontWeight: FontWeight.w600, fontSize: 15)),
++        ]),
++      ),
++    );
++  }
++}
++
++// ------------------------------------------------------- one category only --
++
++class _CategoryList extends StatelessWidget {
++  const _CategoryList({required this.c, required this.tabName});
++  final SearchResultScreenController c;
++  final String tabName;
++
++  @override
++  Widget build(BuildContext context) {
++    return Obx(() {
++      final raw = c.separatedResultContent[tabName];
++      final loading = c.isSeparatedResultContentFetced.isFalse;
++      final items = raw is List ? raw.toList() : <dynamic>[];
++      if (items.isEmpty) {
++        return Center(
++            child: loading
++                ? const LoadingIndicator()
++                : Text("nomatch".tr,
++                    style: Theme.of(context).textTheme.titleMedium));
++      }
++      final songs = tabName == 'Songs' ? List<MediaItem>.from(items) : null;
++      return ListView.builder(
++        controller: c.scrollControllers[tabName],
++        padding: const EdgeInsets.only(bottom: 200),
++        physics: const BouncingScrollPhysics(
++            parent: AlwaysScrollableScrollPhysics()),
++        itemCount: items.length,
++        itemBuilder: (context, i) {
++          final item = items[i];
++          if (item is MediaItem) {
++            return SearchSongTile(
++                key: ValueKey("cat_${item.id}"), song: item, queue: songs!);
++          }
++          if (item is Artist) {
++            return _row(context,
++                leading: ImageWidget(size: 56, artist: item),
++                title: item.name,
++                subtitle: "Artist",
++                onTap: () => _openArtist(item));
++          }
++          if (item is Album) {
++            return _row(context,
++                leading: ImageWidget(size: 56, album: item),
++                title: item.title,
++                subtitle: "Album • ${_albumArtist(item)}",
++                onTap: () => _openAlbum(item));
++          }
++          if (item is Playlist) {
++            return _row(context,
++                leading: ImageWidget(size: 56, playlist: item),
++                title: item.title,
++                subtitle: "Playlist",
++                onTap: () => _openPlaylist(item));
++          }
++          return const SizedBox.shrink();
++        },
++      );
++    });
++  }
++
++  Widget _row(BuildContext context,
++      {required Widget leading,
++      required String title,
++      required String subtitle,
++      required VoidCallback onTap}) {
++    final textTheme = Theme.of(context).textTheme;
++    return ListTile(
++      contentPadding: const EdgeInsets.only(left: 10, right: 12),
++      onTap: onTap,
++      leading: leading,
++      title: Text(title,
++          maxLines: 1,
++          overflow: TextOverflow.ellipsis,
++          style: textTheme.titleMedium),
++      subtitle: Text(subtitle,
++          maxLines: 1,
++          overflow: TextOverflow.ellipsis,
++          style: textTheme.titleSmall),
+     );
+   }
+ }
 diff --git a/lib/ui/screens/Search/search_screen.dart b/lib/ui/screens/Search/search_screen.dart
 index 5567e2f..114e0cd 100644
 --- a/lib/ui/screens/Search/search_screen.dart
@@ -3830,10 +4691,27 @@ index 1d7bfd9..45ed015 100644
      textInputController.dispose();
      queryBox.close();
 diff --git a/lib/ui/screens/Settings/settings_screen.dart b/lib/ui/screens/Settings/settings_screen.dart
-index 3daf875..03f7d44 100644
+index 3daf875..99f02d1 100644
 --- a/lib/ui/screens/Settings/settings_screen.dart
 +++ b/lib/ui/screens/Settings/settings_screen.dart
-@@ -303,15 +303,11 @@ class SettingsScreen extends StatelessWidget {
+@@ -202,13 +202,9 @@ class SettingsScreen extends StatelessWidget {
+                           settingsController.discoverContentType.value == "QP"
+                               ? "quickpicks".tr
+                               : settingsController.discoverContentType.value ==
+-                                      "TMV"
+-                                  ? "topmusicvideos".tr
+-                                  : settingsController
+-                                              .discoverContentType.value ==
+-                                          "TR"
+-                                      ? "trending".tr
+-                                      : "basedOnLast".tr,
++                                      "TR"
++                                  ? "trending".tr
++                                  : "basedOnLast".tr,
+                           style: Theme.of(context).textTheme.bodyMedium)),
+                       onTap: () => showDialog(
+                         context: context,
+@@ -303,15 +299,11 @@ class SettingsScreen extends StatelessWidget {
                                    if (sp.isLoggedIn.value) {
                                      ScaffoldMessenger.of(context).showSnackBar(
                                          snackbar(context,
@@ -3853,8 +4731,19 @@ index 3daf875..03f7d44 100644
                                    } else {
                                      showDialog(
                                          context: context,
+@@ -854,10 +846,6 @@ class DiscoverContentSelectorDialog extends StatelessWidget {
+                       label: "quickpicks".tr,
+                       controller: settingsController,
+                       value: "QP"),
+-                  radioWidget(
+-                      label: "topmusicvideos".tr,
+-                      controller: settingsController,
+-                      value: "TMV"),
+                   radioWidget(
+                       label: "trending".tr,
+                       controller: settingsController,
 diff --git a/lib/ui/screens/Settings/settings_screen_controller.dart b/lib/ui/screens/Settings/settings_screen_controller.dart
-index 4c7d6cb..1d0fddd 100644
+index 4c7d6cb..b5e7c0b 100644
 --- a/lib/ui/screens/Settings/settings_screen_controller.dart
 +++ b/lib/ui/screens/Settings/settings_screen_controller.dart
 @@ -84,8 +84,14 @@ class SettingsScreenController extends GetxController {
@@ -3882,6 +4771,14 @@ index 4c7d6cb..1d0fddd 100644
      restorePlaybackSession.value =
          setBox.get("restrorePlaybackSession") ?? false;
      cacheHomeScreenData.value = setBox.get("cacheHomeScreenData") ?? true;
+@@ -117,6 +123,7 @@ class SettingsScreenController extends GetxController {
+         setBox.get("exportLocationPath") ?? "/storage/emulated/0/Music";
+     downloadingFormat.value = setBox.get('downloadingFormat') ?? "m4a";
+     discoverContentType.value = setBox.get('discoverContentType') ?? "QP";
++    if (discoverContentType.value == "TMV") discoverContentType.value = "TR";
+     slidableActionEnabled.value = setBox.get('slidableActionEnabled') ?? true;
+     if (setBox.containsKey("piped")) {
+       isLinkedWithPiped.value = setBox.get("piped")['isLoggedIn'];
 diff --git a/lib/ui/utils/cover_color.dart b/lib/ui/utils/cover_color.dart
 new file mode 100644
 index 0000000..29397ac
@@ -3963,19 +4860,20 @@ index 1cf0129..2bd3de1 100644
      } else {
        final videosId = songs.map((e) => e.id).toList();
 diff --git a/lib/ui/widgets/animated_screen_transition.dart b/lib/ui/widgets/animated_screen_transition.dart
-index d298bf0..ca561e0 100644
+index d298bf0..3d549d2 100644
 --- a/lib/ui/widgets/animated_screen_transition.dart
 +++ b/lib/ui/widgets/animated_screen_transition.dart
-@@ -1,6 +1,8 @@
+@@ -1,6 +1,9 @@
  import 'package:animations/animations.dart';
  import 'package:flutter/material.dart';
  
-+/// Tab switch: current tab fades out to black, next tab fades in (no zoom).
++/// Tab switch: the content of the current tab fades out, then the content of
++/// the next tab fades in. No black layer, no zoom.
 +/// (the horizontal/reverse flags are kept for API compatibility)
  class AnimatedScreenTransition extends StatelessWidget {
    const AnimatedScreenTransition(
        {super.key,
-@@ -16,39 +18,23 @@ class AnimatedScreenTransition extends StatelessWidget {
+@@ -16,39 +19,18 @@ class AnimatedScreenTransition extends StatelessWidget {
    @override
    Widget build(BuildContext context) {
      if (!enabled) return child;
@@ -4000,32 +4898,28 @@ index d298bf0..ca561e0 100644
 -      duration: horizontalTransition
 -          ? const Duration(milliseconds: 400)
 -          : const Duration(milliseconds: 450),
-+      duration: const Duration(milliseconds: 180),
-+      // plain fade: the old tab fades out, then the new one fades in
-+      // (no zoom / scale)
++      duration: const Duration(milliseconds: 220),
        transitionBuilder: (child, primaryAnimation, secondaryAnimation) {
 -        return DualTransitionBuilder(
 -          animation: primaryAnimation,
 -          forwardBuilder: (context, animation, child) => SlideTransition(
 -            position: forwardTween.animate(CurvedAnimation(parent: primaryAnimation, curve: Curves.easeOutCubic)),
 -            child: child,
-+        final fadeIn = CurvedAnimation(
-+            parent: primaryAnimation,
-+            curve: const Interval(0.5, 1.0, curve: Curves.easeOut));
-+        final fadeOut = ReverseAnimation(CurvedAnimation(
-+            parent: secondaryAnimation,
-+            curve: const Interval(0.0, 0.5, curve: Curves.easeIn)));
-+        return FadeTransition(
-+          opacity: fadeIn,
-+          child: ColoredBox(
-+            color: Colors.black,
-+            child: FadeTransition(opacity: fadeOut, child: child),
-           ),
+-          ),
 -          reverseBuilder: (context, animation, child) => SlideTransition(
 -            position: reverseTween.animate(CurvedAnimation(parent: secondaryAnimation, curve: Curves.easeOutCubic)),
 -            child: child,
 -          ),
 -          child: child,
++        final fadeIn = CurvedAnimation(
++            parent: primaryAnimation,
++            curve: const Interval(0.4, 1.0, curve: Curves.easeOut));
++        final fadeOut = ReverseAnimation(CurvedAnimation(
++            parent: secondaryAnimation,
++            curve: const Interval(0.0, 0.6, curve: Curves.easeIn)));
++        return FadeTransition(
++          opacity: fadeIn,
++          child: FadeTransition(opacity: fadeOut, child: child),
          );
        },
        child: child,
@@ -4133,7 +5027,7 @@ index 0000000..9a45336
 +  }
 +}
 diff --git a/lib/ui/widgets/image_widget.dart b/lib/ui/widgets/image_widget.dart
-index 0b9a383..0bc97f3 100644
+index 0b9a383..df969a8 100644
 --- a/lib/ui/widgets/image_widget.dart
 +++ b/lib/ui/widgets/image_widget.dart
 @@ -21,7 +21,9 @@ class ImageWidget extends StatelessWidget {
@@ -4146,7 +5040,25 @@ index 0b9a383..0bc97f3 100644
    final MediaItem? song;
    final Playlist? playlist;
    final Album? album;
-@@ -60,7 +62,9 @@ class ImageWidget extends StatelessWidget {
+@@ -31,6 +33,9 @@ class ImageWidget extends StatelessWidget {
+ 
+   @override
+   Widget build(BuildContext context) {
++    // ask for a picture that really fills the box on this screen's density
++    final int px =
++        (size * MediaQuery.devicePixelRatioOf(context) * 1.5).round().clamp(64, 1200).toInt();
+     String imageUrl = song != null
+         ? song!.artUri.toString()
+         : playlist != null
+@@ -40,6 +45,7 @@ class ImageWidget extends StatelessWidget {
+                 : artist != null
+                     ? artist!.thumbnailUrl
+                     : "";
++    imageUrl = _sharper(imageUrl, px);
+     // String cacheKey = song != null
+     //     ? "${song!.id}_song"
+     //     : playlist != null
+@@ -60,7 +66,9 @@ class ImageWidget extends StatelessWidget {
        clipBehavior: Clip.antiAlias,
        decoration: BoxDecoration(
          shape: artist != null ? BoxShape.circle : BoxShape.rectangle,
@@ -4157,7 +5069,17 @@ index 0b9a383..0bc97f3 100644
        ),
        child: offlineAvailable
            ? Image.file(
-@@ -91,8 +95,9 @@ class ImageWidget extends StatelessWidget {
+@@ -79,7 +87,8 @@ class ImageWidget extends StatelessWidget {
+           : CachedNetworkImage(
+               height: size,
+               width: size,
+-              memCacheHeight: (song != null && !isPlayerArtImage) ? 140 : null,
++              memCacheHeight: isPlayerArtImage ? null : px,
++              filterQuality: FilterQuality.high,
+               //memCacheWidth: (song != null && !isPlayerArtImage)? 140 : null,
+               //cacheKey: cacheKey,
+               imageUrl: imageUrl,
+@@ -91,8 +100,9 @@ class ImageWidget extends StatelessWidget {
                        color: Theme.of(context).colorScheme.secondary,
                        shape:
                            artist != null ? BoxShape.circle : BoxShape.rectangle,
@@ -4169,7 +5091,7 @@ index 0b9a383..0bc97f3 100644
                      ),
                      child: Image.asset(
                          "assets/icons/${song != null ? "song" : artist != null ? "artist" : "album"}.png"));
-@@ -106,8 +111,9 @@ class ImageWidget extends StatelessWidget {
+@@ -106,8 +116,9 @@ class ImageWidget extends StatelessWidget {
                      decoration: BoxDecoration(
                        shape:
                            artist != null ? BoxShape.circle : BoxShape.rectangle,
@@ -4181,6 +5103,33 @@ index 0b9a383..0bc97f3 100644
                        color: Colors.white54,
                      ),
                    ))),
+@@ -115,3 +126,26 @@ class ImageWidget extends StatelessWidget {
+     );
+   }
+ }
++
++/// Swaps a thumbnail url for a bigger version of the same picture when the
++/// widget needs more pixels than the url provides (YouTube Music and Spotify
++/// urls both encode their size).
++String _sharper(String url, int px) {
++  if (url.isEmpty) return url;
++  // YouTube Music: ...=w226-h226-l90-rj  /  ...=s226
++  if (url.contains("-rj")) {
++    final want = px.clamp(120, 1000);
++    return "${url.split("=")[0]}=w$want-h$want-l90-rj";
++  }
++  if (url.contains("=s") && url.contains("googleusercontent")) {
++    return "${url.split("=s")[0]}=s${px.clamp(120, 1000)}";
++  }
++  // Spotify album art: 64px / 300px / 640px versions share the same hash
++  if (url.contains("i.scdn.co/image/") && px > 300) {
++    return url
++        .replaceFirst("ab67616d00004851", "ab67616d0000b273")
++        .replaceFirst("ab67616d00001e02", "ab67616d0000b273");
++  }
++  return url;
++}
++
 diff --git a/lib/ui/widgets/library_search_overlay.dart b/lib/ui/widgets/library_search_overlay.dart
 new file mode 100644
 index 0000000..59e21f0
