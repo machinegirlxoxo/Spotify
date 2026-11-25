@@ -84,8 +84,14 @@ class SettingsScreenController extends GetxController {
         : appLang == "zh_Hans"
             ? "zh-CN"
             : appLang;
+    // one-time defaults for the Spotify-style UI (still changeable in settings)
+    if (setBox.get("spotifyUiDefaultsApplied") != true) {
+      setBox.put("isBottomNavBarEnabled", true);
+      setBox.put("autoOpenPlayer", false);
+      setBox.put("spotifyUiDefaultsApplied", true);
+    }
     isBottomNavBarEnabled.value =
-        isDesktop ? false : (setBox.get("isBottomNavBarEnabled") ?? false);
+        isDesktop ? false : (setBox.get("isBottomNavBarEnabled") ?? true);
     noOfHomeScreenContent.value = setBox.get("noOfHomeScreenContent") ?? 3;
     isTransitionAnimationDisabled.value =
         setBox.get("isTransitionAnimationDisabled") ?? false;
@@ -96,7 +102,7 @@ class SettingsScreenController extends GetxController {
     loudnessNormalizationEnabled.value = isDesktop
         ? false
         : (setBox.get("loudnessNormalizationEnabled") ?? false);
-    autoOpenPlayer.value = (setBox.get("autoOpenPlayer") ?? true);
+    autoOpenPlayer.value = (setBox.get("autoOpenPlayer") ?? false);
     restorePlaybackSession.value =
         setBox.get("restrorePlaybackSession") ?? false;
     cacheHomeScreenData.value = setBox.get("cacheHomeScreenData") ?? true;
