@@ -1,6 +1,283 @@
+diff --git a/lib/ui/home.dart b/lib/ui/home.dart
+--- a/lib/ui/home.dart
++++ b/lib/ui/home.dart
+@@ -12,6 +12,8 @@ import '../ui/player/player.dart';
+ import 'player/components/mini_player.dart';
+ import 'player/player_controller.dart';
+ import 'widgets/bottom_nav_bar.dart';
++import 'widgets/scroll_to_hide.dart';
++import 'widgets/library_search_overlay.dart';
+ import 'widgets/sliding_up_panel.dart';
+ import 'widgets/snackbar.dart';
+ import 'widgets/spotify_login_dialog.dart';
+@@ -44,6 +46,10 @@ class Home extends StatelessWidget {
+       canPop: false,
+       onPopInvokedWithResult: (didPop, result) async {
+         if (didPop) return;
++        if (LibrarySearchOverlay.isOpen) {
++          LibrarySearchOverlay.close();
++          return;
++        }
+         if (playerController.playerPanelController.isPanelOpen) {
+           // Close the queue first, then the player.
+           if (!GetPlatform.isDesktop &&
+@@ -51,7 +57,7 @@ class Home extends StatelessWidget {
+               playerController.queuePanelController.isPanelOpen) {
+             playerController.queuePanelController.close();
+           } else {
+-            playerController.playerPanelController.close();
++            playerController.closePlayerFade();
+           }
+         } else {
+           if (Get.nestedKey(ScreenNavigationSetup.id)!.currentState!.canPop()) {
+@@ -207,7 +213,8 @@ class Home extends StatelessWidget {
+                     )
+                   : null,
+               drawerScrimColor: Colors.transparent,
+-              body: Obx(() => SlidingUpPanel(
++              body: Stack(children: [
++                  Obx(() => SlidingUpPanel(
+                     onPanelSlide: playerController.panellistener,
+                     controller: playerController.playerPanelController,
+                     minHeight: playerController.playerPanelMinHeight.value,
+@@ -223,11 +230,22 @@ class Home extends StatelessWidget {
+                     body: const ScreenNavigation(),
+                     header: !isWideScreen
+                         ? InkWell(
+-                            onTap: playerController.playerPanelController.open,
++                            onTap: () => playerController.openPlayerFade(),
+                             child: const MiniPlayer(),
+                           )
+                         : const MiniPlayer(),
+-                  ))),
++                  )),
++                  // black overlay for the fade-through-black player open/close
++                  Positioned.fill(
++                    child: Obx(() => IgnorePointer(
++                          child: AnimatedOpacity(
++                            opacity: playerController.fadeOverlay.value,
++                            duration: playerController.fadeOverlayDuration.value,
++                            child: const ColoredBox(color: Colors.black),
++                          ),
++                        )),
++                  ),
++                ])),
+         ),
+       ),
+     );
+diff --git a/lib/ui/navigator.dart b/lib/ui/navigator.dart
+--- a/lib/ui/navigator.dart
++++ b/lib/ui/navigator.dart
+@@ -11,6 +11,32 @@ import 'screens/Playlist/playlist_screen.dart';
+ import 'screens/Search/search_result_screen.dart';
+ import 'screens/Search/search_screen.dart';
+ 
++/// Old page fades to black, then the new page fades in (no slide).
++class FadeThroughBlackTransition extends CustomTransition {
++  @override
++  Widget buildTransition(
++      BuildContext context,
++      Curve? curve,
++      Alignment? alignment,
++      Animation<double> animation,
++      Animation<double> secondaryAnimation,
++      Widget child) {
++    final fadeIn = CurvedAnimation(
++        parent: animation,
++        curve: const Interval(0.5, 1.0, curve: Curves.easeOut));
++    final fadeOut = ReverseAnimation(CurvedAnimation(
++        parent: secondaryAnimation,
++        curve: const Interval(0.0, 0.5, curve: Curves.easeIn)));
++    return FadeTransition(
++      opacity: fadeIn,
++      child: ColoredBox(
++        color: Colors.black,
++        child: FadeTransition(opacity: fadeOut, child: child),
++      ),
++    );
++  }
++}
++
+ class ScreenNavigationSetup {
+   ScreenNavigationSetup._();
+ 
+@@ -37,7 +63,9 @@ class ScreenNavigation extends StatelessWidget {
+ 
+             case ScreenNavigationSetup.homeScreen:
+               return GetPageRoute(
+-                  page: () => const HomeScreen(), settings: settings);
++                  page: () => const HomeScreen(), settings: settings,
++                  customTransition: FadeThroughBlackTransition(),
++                  transitionDuration: const Duration(milliseconds: 350));
+             
+             case ScreenNavigationSetup.albumScreen:
+               final id = (settings.arguments as (Album?, String)).$2;
+@@ -45,7 +73,9 @@ class ScreenNavigation extends StatelessWidget {
+                   page: () => AlbumScreen(
+                         key: Key(id),
+                       ),
+-                  settings: settings);
++                  settings: settings,
++                  customTransition: FadeThroughBlackTransition(),
++                  transitionDuration: const Duration(milliseconds: 350));
+             
+             case ScreenNavigationSetup.playlistScreen:
+              final id = (settings.arguments as List)[1] as String;
+@@ -53,15 +83,21 @@ class ScreenNavigation extends StatelessWidget {
+                   page: () => PlaylistScreen(
+                         key: Key(id),
+                       ),
+-                  settings: settings);
++                  settings: settings,
++                  customTransition: FadeThroughBlackTransition(),
++                  transitionDuration: const Duration(milliseconds: 350));
+             
+             case ScreenNavigationSetup.searchScreen:
+               return GetPageRoute(
+-                  page: () => const SearchScreen(), settings: settings);
++                  page: () => const SearchScreen(), settings: settings,
++                  customTransition: FadeThroughBlackTransition(),
++                  transitionDuration: const Duration(milliseconds: 350));
+             
+             case ScreenNavigationSetup.searchResultScreen:
+               return GetPageRoute(
+-                  page: () => const SearchResultScreen(), settings: settings);
++                  page: () => const SearchResultScreen(), settings: settings,
++                  customTransition: FadeThroughBlackTransition(),
++                  transitionDuration: const Duration(milliseconds: 350));
+             
+             case ScreenNavigationSetup.artistScreen:
+               final args = settings.arguments as List;
+@@ -70,7 +106,9 @@ class ScreenNavigation extends StatelessWidget {
+                   page: () => ArtistScreen(
+                         key: Key(id),
+                       ),
+-                  settings: settings);
++                  settings: settings,
++                  customTransition: FadeThroughBlackTransition(),
++                  transitionDuration: const Duration(milliseconds: 350));
+             
+             default:
+               return null;
+diff --git a/lib/ui/player/components/mini_player.dart b/lib/ui/player/components/mini_player.dart
+--- a/lib/ui/player/components/mini_player.dart
++++ b/lib/ui/player/components/mini_player.dart
+@@ -122,7 +122,7 @@ class MiniPlayer extends StatelessWidget {
+                               }
+                             },
+                             onTap: () {
+-                              playerController.playerPanelController.open();
++                              playerController.openPlayerFade();
+                             },
+                             child: ColoredBox(
+                               color: Colors.transparent,
+diff --git a/lib/ui/player/components/standard_player.dart b/lib/ui/player/components/standard_player.dart
+--- a/lib/ui/player/components/standard_player.dart
++++ b/lib/ui/player/components/standard_player.dart
+@@ -1,5 +1,6 @@
+ import 'package:flutter/material.dart';
+ import 'package:get/get.dart';
++import 'package:widget_marquee/widget_marquee.dart';
+ 
+ import '../../widgets/songinfo_bottom_sheet.dart';
+ import '../../widgets/spotify_style.dart';
+@@ -194,7 +195,7 @@ class _StandardPlayerState extends State<StandardPlayer> {
+                     Icons.keyboard_arrow_down,
+                     size: 28,
+                   ),
+-                  onPressed: playerController.playerPanelController.close,
++                  onPressed: () => playerController.closePlayerFade(),
+                 ),
+ 
+                 /// Playing from [Album name]
+@@ -212,11 +213,18 @@ class _StandardPlayerState extends State<StandardPlayer> {
+                                   letterSpacing: 0.8,
+                                   fontWeight: FontWeight.w400)),
+                           Obx(
+-                            () => Text(
+-                              playerController.playinfrom.value.nameString,
+-                              overflow: TextOverflow.ellipsis,
+-                              style: const TextStyle(
+-                                  fontSize: 15, fontWeight: FontWeight.w700),
++                            () => Marquee(
++                              delay: const Duration(milliseconds: 300),
++                              duration: const Duration(seconds: 5),
++                              id: playerController.playinfrom.value.nameString
++                                  .hashCode
++                                  .toString(),
++                              child: Text(
++                                playerController.playinfrom.value.nameString,
++                                maxLines: 1,
++                                style: const TextStyle(
++                                    fontSize: 15, fontWeight: FontWeight.w700),
++                              ),
+                             ),
+                           )
+                         ],
+diff --git a/lib/ui/player/player_controller.dart b/lib/ui/player/player_controller.dart
+--- a/lib/ui/player/player_controller.dart
++++ b/lib/ui/player/player_controller.dart
+@@ -29,6 +29,45 @@ class PlayerController extends GetxController
+   final currentQueue = <MediaItem>[].obs;
+ 
+   final playerPaneOpacity = (1.0).obs;
++
++  /// black overlay used to fade the player in/out (instead of sliding)
++  final fadeOverlay = 0.0.obs;
++  final fadeOverlayDuration = Duration.zero.obs;
++  bool _fadingPlayer = false;
++
++  Future<void> _fadeThroughBlack(Future<void> Function() change) async {
++    if (_fadingPlayer) return;
++    _fadingPlayer = true;
++    fadeOverlayDuration.value = const Duration(milliseconds: 160);
++    fadeOverlay.value = 1.0;
++    await Future.delayed(const Duration(milliseconds: 170));
++    await change();
++    await Future.delayed(const Duration(milliseconds: 40));
++    fadeOverlayDuration.value = const Duration(milliseconds: 220);
++    fadeOverlay.value = 0.0;
++    await Future.delayed(const Duration(milliseconds: 230));
++    _fadingPlayer = false;
++  }
++
++  /// miniplayer -> full player: fade to black, then fade in
++  Future<void> openPlayerFade() async {
++    if (!playerPanelController.isAttached ||
++        playerPanelController.isPanelOpen) {
++      return;
++    }
++    await _fadeThroughBlack(() => playerPanelController
++        .animatePanelToPosition(1.0, duration: Duration.zero));
++  }
++
++  /// full player -> miniplayer: fade to black, then fade in
++  Future<void> closePlayerFade() async {
++    if (!playerPanelController.isAttached ||
++        playerPanelController.isPanelClosed) {
++      return;
++    }
++    await _fadeThroughBlack(() => playerPanelController
++        .animatePanelToPosition(0.0, duration: Duration.zero));
++  }
+   final isPlayerpanelTopVisible = true.obs;
+   final isPanelGTHOpened = false.obs;
+ 
+@@ -506,10 +545,10 @@ class PlayerController extends GetxController
+ 
+   void _playerPanelCheck({bool restoreSession = false}) {
+     final isWideScreen = Get.size.width > 800;
+-    final autoOpenPlayer = Hive.box("AppPrefs").get("autoOpenPlayer") ?? true;
++    final autoOpenPlayer = Hive.box("AppPrefs").get("autoOpenPlayer") ?? false;
+     if ((!isWideScreen && autoOpenPlayer && playerPanelController.isAttached) &&
+         !restoreSession) {
+-      playerPanelController.open();
++      openPlayerFade();
+     }
+ 
+     if (initFlagForPlayer) {
 diff --git a/lib/ui/screens/Album/album_header.dart b/lib/ui/screens/Album/album_header.dart
 new file mode 100644
-index 0000000..3660221
 --- /dev/null
 +++ b/lib/ui/screens/Album/album_header.dart
 @@ -0,0 +1,231 @@
@@ -236,7 +513,6 @@ index 0000000..3660221
 +  }
 +}
 diff --git a/lib/ui/screens/Album/album_screen.dart b/lib/ui/screens/Album/album_screen.dart
-index e1fd1a4..f301e3c 100644
 --- a/lib/ui/screens/Album/album_screen.dart
 +++ b/lib/ui/screens/Album/album_screen.dart
 @@ -15,6 +15,8 @@ import '../../widgets/snackbar.dart';
@@ -565,7 +841,6 @@ index e1fd1a4..f301e3c 100644
                              },
                            ),
 diff --git a/lib/ui/screens/Album/album_screen_controller.dart b/lib/ui/screens/Album/album_screen_controller.dart
-index 6a98ac5..687c44c 100644
 --- a/lib/ui/screens/Album/album_screen_controller.dart
 +++ b/lib/ui/screens/Album/album_screen_controller.dart
 @@ -58,30 +58,35 @@ class AlbumScreenController extends PlaylistAlbumScreenControllerBase
@@ -616,11 +891,48 @@ index 6a98ac5..687c44c 100644
      }
    }
  
+diff --git a/lib/ui/screens/Home/home_screen_controller.dart b/lib/ui/screens/Home/home_screen_controller.dart
+--- a/lib/ui/screens/Home/home_screen_controller.dart
++++ b/lib/ui/screens/Home/home_screen_controller.dart
+@@ -1,5 +1,7 @@
+ import 'package:audio_service/audio_service.dart';
+ import 'package:flutter/material.dart';
++import '../../widgets/library_search_overlay.dart';
++import '../Search/search_screen_controller.dart';
+ import 'package:get/get.dart';
+ import 'package:hive/hive.dart';
+ 
+@@ -257,11 +259,19 @@ class HomeScreenController extends GetxController {
+   }
+ 
+   void onSideBarTabSelected(int index) {
++    LibrarySearchOverlay.close();
++    if (Get.isRegistered<SearchScreenController>()) {
++      Get.find<SearchScreenController>().resetToLanding();
++    }
+     reverseAnimationtransiton = index > tabIndex.value;
+     tabIndex.value = index;
+   }
+ 
+   void onBottonBarTabSelected(int index) {
++    LibrarySearchOverlay.close();
++    if (Get.isRegistered<SearchScreenController>()) {
++      Get.find<SearchScreenController>().resetToLanding();
++    }
+     reverseAnimationtransiton = index > tabIndex.value;
+     tabIndex.value = index;
+   }
 diff --git a/lib/ui/screens/Library/library_controller.dart b/lib/ui/screens/Library/library_controller.dart
-index 9a387c2..13e2614 100644
 --- a/lib/ui/screens/Library/library_controller.dart
 +++ b/lib/ui/screens/Library/library_controller.dart
-@@ -254,13 +254,13 @@ class LibraryPlaylistsController extends GetxController
+@@ -1,5 +1,6 @@
+ import 'dart:io';
+ import 'package:audio_service/audio_service.dart';
++import 'package:flutter/foundation.dart' show compute;
+ import 'package:flutter/material.dart';
+ import 'package:get/get.dart';
+ import 'package:harmonymusic/ui/widgets/snackbar.dart';
+@@ -254,13 +255,13 @@ class LibraryPlaylistsController extends GetxController
  
    void refreshLib() async {
      final box = await Hive.openBox("LibraryPlaylists");
@@ -636,7 +948,7 @@ index 9a387c2..13e2614 100644
  
      final appPrefsBox = Hive.box("AppPrefs");
      if (appPrefsBox.containsKey("piped")) {
-@@ -271,6 +271,39 @@ class LibraryPlaylistsController extends GetxController
+@@ -271,6 +272,39 @@ class LibraryPlaylistsController extends GetxController
      await box.close();
    }
  
@@ -676,7 +988,7 @@ index 9a387c2..13e2614 100644
    void updatePlaylistIntoDb(Playlist playlist) async {
      final box = await Hive.openBox("LibraryPlaylists");
      box.put(playlist.playlistId, playlist.toJson());
-@@ -428,8 +461,10 @@ class LibraryPlaylistsController extends GetxController
+@@ -428,8 +462,10 @@ class LibraryPlaylistsController extends GetxController
    }
  
    void onSort(SortType sortType, bool isAscending) {
@@ -689,8 +1001,234 @@ index 9a387c2..13e2614 100644
      sortPlayLists(playlists, sortType, isAscending);
      playlists.insertAll(0, initPlst);
      libraryPlaylists.value = playlists;
+@@ -459,45 +495,39 @@ class LibraryPlaylistsController extends GetxController
+     super.dispose();
+   }
+ 
++  /// Imports a playlist JSON file in the background: no dialog, the UI stays
++  /// usable. JSON is parsed in an isolate and all songs are written to the
++  /// database in a single batch (instead of one awaited write per song).
+   Future<void> importPlaylistFromJson(BuildContext context) async {
+     try {
+-      isImporting.value = true;
+-      importProgress.value = 0.1;
+-
+-      // Show progress dialog
+-      if (context.mounted) {
+-        _showImportProgressDialog(context);
+-      }
+-
+       // Use file_picker to select JSON file
+       final result = await FilePicker.platform.pickFiles(
+         type: FileType.custom,
+         allowedExtensions: ['json'],
+         dialogTitle: 'importPlaylist'.tr,
+       );
+-
+-      if (result == null || result.files.isEmpty) {
+-        // User cancelled the picker
+-        if (Get.isDialogOpen ?? false) {
+-          Get.back();
+-        }
+-        isImporting.value = false;
+-        importProgress.value = 0.0;
+-        return;
+-      }
+-
+-      importProgress.value = 0.2;
++      if (result == null || result.files.isEmpty) return;
+ 
+       final file = File(result.files.single.path!);
+       if (!await file.exists()) {
+         throw FileSystemException("fileNotFound".tr);
+       }
+ 
+-      final jsonString = await file.readAsString();
+-      importProgress.value = 0.3;
++      isImporting.value = true;
++      _importToast("importingPlaylist".tr);
++      _runPlaylistImport(file);
++    } catch (e) {
++      isImporting.value = false;
++      _importFailed(e);
++    }
++  }
+ 
+-      final jsonData = jsonDecode(jsonString);
+-      importProgress.value = 0.4;
++  // runs without blocking the UI
++  Future<void> _runPlaylistImport(File file) async {
++    try {
++      final jsonString = await file.readAsString();
++      final Map<String, dynamic> jsonData =
++          await compute(_decodePlaylistJson, jsonString);
+ 
+       // Validate JSON structure
+       if (!jsonData.containsKey('playlistInfo') ||
+@@ -505,12 +535,9 @@ class LibraryPlaylistsController extends GetxController
+         throw FormatException("invalidPlaylistFile".tr);
+       }
+ 
+-      // Create new playlist ID
+       final playlistInfo = jsonData['playlistInfo'];
+       final newPlaylistId = "LIB${DateTime.now().millisecondsSinceEpoch}";
+-      importProgress.value = 0.5;
+ 
+-      // Create playlist object
+       final newPlaylist = Playlist(
+         title: "${playlistInfo['title']} (${"imported".tr})",
+         playlistId: newPlaylistId,
+@@ -522,115 +549,56 @@ class LibraryPlaylistsController extends GetxController
+         description: playlistInfo['description'] ?? "importedPlaylist".tr,
+         isCloudPlaylist: false,
+       );
+-      importProgress.value = 0.6;
+ 
+-      // Save playlist to database
+-      final box = await Hive.openBox("LibraryPlaylists");
+-      box.put(newPlaylistId, newPlaylist.toJson());
+-      importProgress.value = 0.7;
+-
+-      // Save songs to playlist
+-      final songsBox = await Hive.openBox(newPlaylistId);
++      // songs: one batched write
+       final songsList = jsonData['songs'] as List;
+-
+-      // Update progress as songs are added
+-      final totalSongs = songsList.length;
+-      for (int i = 0; i < totalSongs; i++) {
+-        await songsBox.put(i, songsList[i]);
+-        // Update progress from 70% to 95% based on song import progress
+-        importProgress.value = 0.7 + (0.25 * (i + 1) / totalSongs);
+-      }
+-
++      final songsBox = await Hive.openBox(newPlaylistId);
++      await songsBox.putAll(songsList.asMap());
+       await songsBox.close();
+-      await box.close();
+-      importProgress.value = 1.0;
+ 
+-      // Close progress dialog if it's still open
+-      if (Get.isDialogOpen ?? false) {
+-        Get.back();
+-      }
++      final box = await Hive.openBox("LibraryPlaylists");
++      await box.put(newPlaylistId, newPlaylist.toJson());
++      await box.close();
+ 
+       // Refresh library to show the new playlist
+       refreshLib();
+-
+-      ScaffoldMessenger.of(Get.context!).showSnackBar(snackbar(
+-          Get.context!, 
+-          "Playlist imported successfully", 
+-          size: SanckBarSize.BIG,
+-          duration: const Duration(seconds: 2),
+-          top: !GetPlatform.isDesktop)
+-      );
+-      
++      _importToast("Playlist imported successfully");
+     } catch (e) {
+-      // Close progress dialog if it's still open
+-      if (Get.isDialogOpen ?? false) {
+-        Get.back();
+-      }
+-
+-      printERROR("Error importing playlist: $e");
+-
+-      String errorMsg = "importError".tr;
+-      if (e is FileSystemException) {
+-        errorMsg = "importErrorFileAccess".tr;
+-      } else if (e is FormatException) {
+-        errorMsg = "importErrorFormat".tr;
+-      } else if (e.toString().contains("invalidPlaylistFile")) {
+-        errorMsg = "invalidPlaylistFile".tr;
+-      } else if (e is HiveError) {
+-        errorMsg = "importErrorDatabase".tr;
+-      }
+-
+-      ScaffoldMessenger.of(Get.context!).showSnackBar(snackbar(
+-          Get.context!, 
+-          errorMsg, 
+-          size: SanckBarSize.BIG,
+-          duration: const Duration(seconds: 2),
+-          top: !GetPlatform.isDesktop)
+-      );
++      _importFailed(e);
+     } finally {
+       isImporting.value = false;
+-      importProgress.value = 0.0;
+     }
+   }
+ 
+-  // Helper method to show import progress dialog
+-  void _showImportProgressDialog(BuildContext context) {
+-    Get.dialog(
+-      AlertDialog(
+-        backgroundColor: Theme.of(context).cardColor,
+-        shape: RoundedRectangleBorder(
+-          borderRadius: BorderRadius.circular(15),
+-        ),
+-        title: Text(
+-          "importingPlaylist".tr,
+-          style: Theme.of(context).textTheme.titleLarge,
+-        ),
+-        content: Obx(() => Column(
+-              mainAxisSize: MainAxisSize.min,
+-              children: [
+-                LinearProgressIndicator(
+-                  value: Get.isRegistered<LibraryPlaylistsController>()
+-                      ? importProgress.value
+-                      : 0,
+-                  backgroundColor:
+-                      Theme.of(context).colorScheme.surfaceContainerHighest,
+-                  valueColor: AlwaysStoppedAnimation<Color>(
+-                    Theme.of(context).colorScheme.secondary,
+-                  ),
+-                ),
+-                const SizedBox(height: 16),
+-                Text(
+-                  "${(Get.isRegistered<LibraryPlaylistsController>() ? importProgress.value * 100 : 0).toInt()}%",
+-                  style: Theme.of(context).textTheme.bodyMedium,
+-                ),
+-              ],
+-            )),
+-      ),
+-      barrierDismissible: false,
+-    );
++  void _importToast(String msg) {
++    final ctx = Get.context;
++    if (ctx == null) return;
++    ScaffoldMessenger.of(ctx).showSnackBar(snackbar(ctx, msg,
++        size: SanckBarSize.BIG,
++        duration: const Duration(seconds: 2),
++        top: !GetPlatform.isDesktop));
++  }
++
++  void _importFailed(Object e) {
++    printERROR("Error importing playlist: $e");
++    String errorMsg = "importError".tr;
++    if (e is FileSystemException) {
++      errorMsg = "importErrorFileAccess".tr;
++    } else if (e is FormatException) {
++      errorMsg = "importErrorFormat".tr;
++    } else if (e.toString().contains("invalidPlaylistFile")) {
++      errorMsg = "invalidPlaylistFile".tr;
++    } else if (e is HiveError) {
++      errorMsg = "importErrorDatabase".tr;
++    }
++    _importToast(errorMsg);
+   }
+ }
+ 
++/// top-level so it can run in an isolate via compute()
++Map<String, dynamic> _decodePlaylistJson(String source) =>
++    Map<String, dynamic>.from(jsonDecode(source) as Map);
++
+ class LibraryAlbumsController extends GetxController {
+   late RxList<Album> libraryAlbums = RxList();
+   final isContentFetched = false.obs;
 diff --git a/lib/ui/screens/Playlist/playlist_screen.dart b/lib/ui/screens/Playlist/playlist_screen.dart
-index ddb7353..4c27a75 100644
 --- a/lib/ui/screens/Playlist/playlist_screen.dart
 +++ b/lib/ui/screens/Playlist/playlist_screen.dart
 @@ -18,6 +18,7 @@ import '../../widgets/snackbar.dart';
@@ -836,8 +1374,16 @@ index ddb7353..4c27a75 100644
                                          List<MediaItem>.from(
                                              playlistController.songList),
                                          index - 3,
+@@ -703,6 +662,8 @@ class PlaylistScreen extends StatelessWidget {
+                                             type: PlaylingFromType.PLAYLIST));
+                                   },
+                                   song: playlistController.songList[index - 3],
++                                  compact: true,
++                                  showThumb: true,
+                                   isPlaylistOrAlbum: true,
+                                   playlist: playlistController.playlist.value,
+                                 ),
 diff --git a/lib/ui/screens/Playlist/playlist_screen_controller.dart b/lib/ui/screens/Playlist/playlist_screen_controller.dart
-index 46b9498..2c54d6b 100644
 --- a/lib/ui/screens/Playlist/playlist_screen_controller.dart
 +++ b/lib/ui/screens/Playlist/playlist_screen_controller.dart
 @@ -152,6 +152,12 @@ class PlaylistScreenController extends PlaylistAlbumScreenControllerBase
@@ -872,7 +1418,6 @@ index 46b9498..2c54d6b 100644
        }
 diff --git a/lib/ui/screens/Search/components/search_song_tile.dart b/lib/ui/screens/Search/components/search_song_tile.dart
 new file mode 100644
-index 0000000..7748419
 --- /dev/null
 +++ b/lib/ui/screens/Search/components/search_song_tile.dart
 @@ -0,0 +1,134 @@
@@ -1011,10 +1556,9 @@ index 0000000..7748419
 +  }
 +}
 diff --git a/lib/ui/screens/Search/search_screen.dart b/lib/ui/screens/Search/search_screen.dart
-index 5567e2f..77aba74 100644
 --- a/lib/ui/screens/Search/search_screen.dart
 +++ b/lib/ui/screens/Search/search_screen.dart
-@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
+@@ -2,17 +2,33 @@ import 'package:flutter/material.dart';
  import 'package:get/get.dart';
  
  import 'components/search_item.dart';
@@ -1022,16 +1566,35 @@ index 5567e2f..77aba74 100644
  import '/ui/screens/Settings/settings_screen_controller.dart';
  import '../../widgets/modified_text_field.dart';
  import '/ui/navigator.dart';
-@@ -12,7 +13,7 @@ class SearchScreen extends StatelessWidget {
+ import 'search_screen_controller.dart';
  
+-class SearchScreen extends StatelessWidget {
++class SearchScreen extends StatefulWidget {
+   const SearchScreen({super.key});
+ 
++  @override
++  State<SearchScreen> createState() => _SearchScreenState();
++}
++
++class _SearchScreenState extends State<SearchScreen> {
++  @override
++  void initState() {
++    super.initState();
++    // always start on screen 1 (white bar), never on the old screen 2
++    final c = Get.put(SearchScreenController());
++    c.isSearchMode.value = false;
++    c.textInputController.clear();
++    c.suggestionList.clear();
++  }
++
    @override
    Widget build(BuildContext context) {
 -    final searchScreenController = Get.put(SearchScreenController());
-+    final c = Get.put(SearchScreenController());
++    final c = Get.find<SearchScreenController>();
      final settingsScreenController = Get.find<SettingsScreenController>();
      final topPadding = context.isLandscape ? 50.0 : 80.0;
      return Scaffold(
-@@ -47,106 +48,240 @@ class SearchScreen extends StatelessWidget {
+@@ -47,106 +63,252 @@ class SearchScreen extends StatelessWidget {
                        ],
                      ),
                    )
@@ -1113,7 +1676,8 @@ index 5567e2f..77aba74 100644
 +  @override
 +  Widget build(BuildContext context) {
 +    return ListView(
-+      padding: EdgeInsets.fromLTRB(16, topPadding - 20, 16, 300),
++      padding: EdgeInsets.fromLTRB(
++          16, MediaQuery.of(context).padding.top + 16, 16, 300),
 +      children: [
 +        Text("search".tr,
 +            style: Theme.of(context)
@@ -1243,9 +1807,10 @@ index 5567e2f..77aba74 100644
 +        // top bar like Spotify: arrow + field + clear
 +        Container(
 +          color: Color.lerp(theme.canvasColor, Colors.white, 0.1),
-+          padding: EdgeInsets.only(top: topPadding - 30, left: 4, right: 4),
-+          height: topPadding + 50,
-+          child: Row(children: [
++          padding: EdgeInsets.only(top: MediaQuery.of(context).padding.top),
++          child: SizedBox(
++            height: 64,
++            child: Row(crossAxisAlignment: CrossAxisAlignment.center, children: [
 +            IconButton(
 +                icon: const Icon(Icons.arrow_back),
 +                onPressed: c.closeSearch),
@@ -1267,8 +1832,17 @@ index 5567e2f..77aba74 100644
 +                },
 +                autofocus: true,
 +                cursorColor: theme.textTheme.bodySmall!.color,
++                textAlignVertical: TextAlignVertical.center,
 +                decoration: InputDecoration(
 +                  border: InputBorder.none,
++                  enabledBorder: InputBorder.none,
++                  focusedBorder: InputBorder.none,
++                  disabledBorder: InputBorder.none,
++                  errorBorder: InputBorder.none,
++                  focusedErrorBorder: InputBorder.none,
++                  filled: false,
++                  isDense: true,
++                  contentPadding: EdgeInsets.zero,
 +                  hintText: "searchDes".tr,
 +                  suffixIcon: IconButton(
 +                    onPressed: c.reset,
@@ -1280,6 +1854,7 @@ index 5567e2f..77aba74 100644
              ),
 -          ],
 +          ]),
++          ),
          ),
 -      ),
 +        Expanded(
@@ -1367,7 +1942,6 @@ index 5567e2f..77aba74 100644
 +  }
  }
 diff --git a/lib/ui/screens/Search/search_screen_controller.dart b/lib/ui/screens/Search/search_screen_controller.dart
-index 1d7bfd9..1db4b2b 100644
 --- a/lib/ui/screens/Search/search_screen_controller.dart
 +++ b/lib/ui/screens/Search/search_screen_controller.dart
 @@ -1,7 +1,11 @@
@@ -1401,7 +1975,7 @@ index 1d7bfd9..1db4b2b 100644
    // Desktop search bar related
    final focusNode = FocusNode();
    final isSearchBarInFocus = false.obs;
-@@ -29,19 +45,89 @@ class SearchScreenController extends GetxController with ProcessLink {
+@@ -29,19 +45,100 @@ class SearchScreenController extends GetxController with ProcessLink {
          isSearchBarInFocus.value = focusNode.hasFocus;
        });
      }
@@ -1444,6 +2018,17 @@ index 1d7bfd9..1db4b2b 100644
 +  }
 +
 +  void openSearch() => isSearchMode.value = true;
++
++  /// back to screen 1 without touching focus (used when switching tabs)
++  void resetToLanding() {
++    isSearchMode.value = false;
++    textInputController.clear();
++    suggestionList.clear();
++    _songDebounce?.cancel();
++    _lastSongQuery = '';
++    songResults.clear();
++    isSongsLoading.value = false;
++  }
 +
 +  void closeSearch() {
 +    reset();
@@ -1491,7 +2076,7 @@ index 1d7bfd9..1db4b2b 100644
    Future<void> suggestionInput(String txt) async {
      textInputController.text = txt;
      textInputController.selection =
-@@ -68,6 +154,10 @@ class SearchScreenController extends GetxController with ProcessLink {
+@@ -68,6 +165,10 @@ class SearchScreenController extends GetxController with ProcessLink {
      urlPasted.value = false;
      textInputController.text = "";
      suggestionList.clear();
@@ -1502,7 +2087,7 @@ index 1d7bfd9..1db4b2b 100644
    }
  
    Future<void> removeQueryFromHistory(String txt) async {
-@@ -78,6 +168,7 @@ class SearchScreenController extends GetxController with ProcessLink {
+@@ -78,6 +179,7 @@ class SearchScreenController extends GetxController with ProcessLink {
  
    @override
    void dispose() {
@@ -1510,9 +2095,36 @@ index 1d7bfd9..1db4b2b 100644
      focusNode.dispose();
      textInputController.dispose();
      queryBox.close();
+diff --git a/lib/ui/screens/Settings/settings_screen_controller.dart b/lib/ui/screens/Settings/settings_screen_controller.dart
+--- a/lib/ui/screens/Settings/settings_screen_controller.dart
++++ b/lib/ui/screens/Settings/settings_screen_controller.dart
+@@ -84,8 +84,14 @@ class SettingsScreenController extends GetxController {
+         : appLang == "zh_Hans"
+             ? "zh-CN"
+             : appLang;
++    // one-time defaults for the Spotify-style UI (still changeable in settings)
++    if (setBox.get("spotifyUiDefaultsApplied") != true) {
++      setBox.put("isBottomNavBarEnabled", true);
++      setBox.put("autoOpenPlayer", false);
++      setBox.put("spotifyUiDefaultsApplied", true);
++    }
+     isBottomNavBarEnabled.value =
+-        isDesktop ? false : (setBox.get("isBottomNavBarEnabled") ?? false);
++        isDesktop ? false : (setBox.get("isBottomNavBarEnabled") ?? true);
+     noOfHomeScreenContent.value = setBox.get("noOfHomeScreenContent") ?? 3;
+     isTransitionAnimationDisabled.value =
+         setBox.get("isTransitionAnimationDisabled") ?? false;
+@@ -96,7 +102,7 @@ class SettingsScreenController extends GetxController {
+     loudnessNormalizationEnabled.value = isDesktop
+         ? false
+         : (setBox.get("loudnessNormalizationEnabled") ?? false);
+-    autoOpenPlayer.value = (setBox.get("autoOpenPlayer") ?? true);
++    autoOpenPlayer.value = (setBox.get("autoOpenPlayer") ?? false);
+     restorePlaybackSession.value =
+         setBox.get("restrorePlaybackSession") ?? false;
+     cacheHomeScreenData.value = setBox.get("cacheHomeScreenData") ?? true;
 diff --git a/lib/ui/utils/cover_color.dart b/lib/ui/utils/cover_color.dart
 new file mode 100644
-index 0000000..29397ac
 --- /dev/null
 +++ b/lib/ui/utils/cover_color.dart
 @@ -0,0 +1,44 @@
@@ -1561,7 +2173,6 @@ index 0000000..29397ac
 +  }
 +}
 diff --git a/lib/ui/widgets/add_to_playlist.dart b/lib/ui/widgets/add_to_playlist.dart
-index 1cf0129..2bd3de1 100644
 --- a/lib/ui/widgets/add_to_playlist.dart
 +++ b/lib/ui/widgets/add_to_playlist.dart
 @@ -8,6 +8,7 @@ import '../../services/piped_service.dart';
@@ -1590,9 +2201,70 @@ index 1cf0129..2bd3de1 100644
        return true;
      } else {
        final videosId = songs.map((e) => e.id).toList();
+diff --git a/lib/ui/widgets/animated_screen_transition.dart b/lib/ui/widgets/animated_screen_transition.dart
+--- a/lib/ui/widgets/animated_screen_transition.dart
++++ b/lib/ui/widgets/animated_screen_transition.dart
+@@ -1,6 +1,8 @@
+ import 'package:animations/animations.dart';
+ import 'package:flutter/material.dart';
+ 
++/// Tab switch: current tab fades out to black, next tab fades in.
++/// (the horizontal/reverse flags are kept for API compatibility)
+ class AnimatedScreenTransition extends StatelessWidget {
+   const AnimatedScreenTransition(
+       {super.key,
+@@ -16,41 +18,15 @@ class AnimatedScreenTransition extends StatelessWidget {
+   @override
+   Widget build(BuildContext context) {
+     if (!enabled) return child;
+-    Tween<Offset> forwardTween;
+-    Tween<Offset> reverseTween;
+-    if (horizontalTransition) {
+-      forwardTween = resverse
+-          ? Tween<Offset>(begin: Offset.zero, end: const Offset(-1, 0))
+-          : Tween<Offset>(begin: Offset.zero, end: const Offset(1, 0));
+-      reverseTween = resverse
+-          ? Tween<Offset>(begin: const Offset(1, 0), end: Offset.zero)
+-          : Tween<Offset>(begin: const Offset(-1, 0), end: Offset.zero);
+-    } else {
+-      forwardTween = resverse
+-          ? Tween<Offset>(begin: Offset.zero, end: const Offset(0, -1))
+-          : Tween<Offset>(begin: Offset.zero, end: const Offset(0, 1));
+-      reverseTween = resverse
+-          ? Tween<Offset>(begin: const Offset(0, 1), end: Offset.zero)
+-          : Tween<Offset>(begin: const Offset(0, -1), end: Offset.zero);
+-    }
+     return PageTransitionSwitcher(
+-      duration: horizontalTransition
+-          ? const Duration(milliseconds: 400)
+-          : const Duration(milliseconds: 450),
+-      transitionBuilder: (child, primaryAnimation, secondaryAnimation) {
+-        return DualTransitionBuilder(
+-          animation: primaryAnimation,
+-          forwardBuilder: (context, animation, child) => SlideTransition(
+-            position: forwardTween.animate(CurvedAnimation(parent: primaryAnimation, curve: Curves.easeOutCubic)),
+-            child: child,
+-          ),
+-          reverseBuilder: (context, animation, child) => SlideTransition(
+-            position: reverseTween.animate(CurvedAnimation(parent: secondaryAnimation, curve: Curves.easeOutCubic)),
+-            child: child,
+-          ),
+-          child: child,
+-        );
+-      },
++      duration: const Duration(milliseconds: 350),
++      transitionBuilder: (child, primaryAnimation, secondaryAnimation) =>
++          FadeThroughTransition(
++        animation: primaryAnimation,
++        secondaryAnimation: secondaryAnimation,
++        fillColor: Colors.black,
++        child: child,
++      ),
+       child: child,
+     );
+   }
 diff --git a/lib/ui/widgets/cover_gradient_background.dart b/lib/ui/widgets/cover_gradient_background.dart
 new file mode 100644
-index 0000000..cf9b826
 --- /dev/null
 +++ b/lib/ui/widgets/cover_gradient_background.dart
 @@ -0,0 +1,97 @@
@@ -1693,15 +2365,217 @@ index 0000000..cf9b826
 +    );
 +  }
 +}
+diff --git a/lib/ui/widgets/library_search_overlay.dart b/lib/ui/widgets/library_search_overlay.dart
+new file mode 100644
+--- /dev/null
++++ b/lib/ui/widgets/library_search_overlay.dart
+@@ -0,0 +1,197 @@
++import 'package:flutter/material.dart';
++import 'package:get/get.dart';
++
++import 'modified_text_field.dart';
++
++/// Spotify-style "Search Your Library" tab.
++///
++/// Instead of an inline bar it opens a full-width top bar (back arrow + grey
++/// field). While the field is empty a "Find your favorites" page covers the
++/// library; once you type, the filtered library list shows underneath.
++class LibrarySearchOverlay {
++  LibrarySearchOverlay._();
++
++  static OverlayEntry? _entry;
++  static VoidCallback? _onClose;
++
++  /// space the tab's list must leave for the top bar while searching
++  static double spacerHeight = 0;
++
++  static bool get isOpen => _entry != null;
++
++  static void open(
++    BuildContext context, {
++    required TextEditingController textController,
++    required void Function(String) onChanged,
++    required VoidCallback onClose,
++  }) {
++    if (_entry != null) return;
++    final overlay = Overlay.of(context);
++    final route = ModalRoute.of(context);
++    final statusBar = MediaQuery.of(context).padding.top;
++    final barHeight = statusBar + 64;
++
++    double top = 0;
++    final box = context.findRenderObject();
++    if (box is RenderBox && box.attached) top = box.localToGlobal(Offset.zero).dy;
++    spacerHeight = (barHeight - top).clamp(0.0, 400.0);
++
++    _onClose = onClose;
++    textController.clear();
++    _entry = OverlayEntry(
++      builder: (ctx) => _Layer(
++        textController: textController,
++        onChanged: onChanged,
++        barHeight: barHeight,
++        onBack: close,
++      ),
++    );
++    final entries = route?.overlayEntries;
++    overlay.insert(_entry!,
++        above: (entries != null && entries.isNotEmpty) ? entries.last : null);
++  }
++
++  static void close() {
++    final entry = _entry;
++    final cb = _onClose;
++    _entry = null;
++    _onClose = null;
++    if (entry == null) return;
++    FocusManager.instance.primaryFocus?.unfocus();
++    entry.remove();
++    cb?.call();
++  }
++}
++
++class _Layer extends StatefulWidget {
++  const _Layer(
++      {required this.textController,
++      required this.onChanged,
++      required this.barHeight,
++      required this.onBack});
++  final TextEditingController textController;
++  final void Function(String) onChanged;
++  final double barHeight;
++  final VoidCallback onBack;
++
++  @override
++  State<_Layer> createState() => _LayerState();
++}
++
++class _LayerState extends State<_Layer> {
++  @override
++  void initState() {
++    super.initState();
++    widget.textController.addListener(_rebuild);
++  }
++
++  @override
++  void dispose() {
++    widget.textController.removeListener(_rebuild);
++    super.dispose();
++  }
++
++  void _rebuild() => setState(() {});
++
++  @override
++  Widget build(BuildContext context) {
++    final bg = Theme.of(context).scaffoldBackgroundColor;
++    final isEmpty = widget.textController.text.isEmpty;
++    final textTheme = Theme.of(context).textTheme;
++    const radius = BorderRadius.all(Radius.circular(6));
++    const none = OutlineInputBorder(
++        borderSide: BorderSide.none, borderRadius: radius);
++    return Material(
++      type: MaterialType.transparency,
++      child: Stack(
++        children: [
++          // "Find your favorites" page, hides the library while empty
++          if (isEmpty)
++            Positioned.fill(
++              child: ColoredBox(
++                color: bg,
++                child: Padding(
++                  padding: EdgeInsets.only(top: widget.barHeight),
++                  child: Center(
++                    child: Padding(
++                      padding: const EdgeInsets.symmetric(horizontal: 30),
++                      child: Column(
++                        mainAxisSize: MainAxisSize.min,
++                        children: [
++                          Text("Find your favorites",
++                              textAlign: TextAlign.center,
++                              style: textTheme.titleLarge!.copyWith(
++                                  fontSize: 26, fontWeight: FontWeight.w800)),
++                          const SizedBox(height: 12),
++                          Text(
++                              "Search everything you've saved, followed, or created.",
++                              textAlign: TextAlign.center,
++                              style: textTheme.titleMedium!
++                                  .copyWith(fontWeight: FontWeight.w400)),
++                          SizedBox(height: widget.barHeight),
++                        ],
++                      ),
++                    ),
++                  ),
++                ),
++              ),
++            ),
++          // top bar: back arrow + grey rounded field
++          Positioned(
++            top: 0,
++            left: 0,
++            right: 0,
++            child: Container(
++              height: widget.barHeight,
++              padding: EdgeInsets.only(
++                  top: MediaQuery.of(context).padding.top, right: 16),
++              decoration: BoxDecoration(color: bg, boxShadow: const [
++                BoxShadow(color: Colors.black38, blurRadius: 4)
++              ]),
++              child: Row(
++                crossAxisAlignment: CrossAxisAlignment.center,
++                children: [
++                  IconButton(
++                    padding: const EdgeInsets.symmetric(horizontal: 18),
++                    icon: const Icon(Icons.arrow_back_ios_new, size: 24),
++                    onPressed: widget.onBack,
++                  ),
++                  Expanded(
++                    child: SizedBox(
++                      height: 44,
++                      child: ModifiedTextField(
++                        controller: widget.textController,
++                        autofocus: true,
++                        textAlignVertical: TextAlignVertical.center,
++                        textInputAction: TextInputAction.search,
++                        onChanged: widget.onChanged,
++                        cursorColor: textTheme.bodySmall!.color,
++                        decoration: InputDecoration(
++                          isDense: true,
++                          filled: true,
++                          fillColor: Color.lerp(bg, Colors.white, 0.12),
++                          contentPadding: const EdgeInsets.symmetric(
++                              horizontal: 14, vertical: 12),
++                          border: none,
++                          enabledBorder: none,
++                          focusedBorder: none,
++                          disabledBorder: none,
++                          errorBorder: none,
++                          focusedErrorBorder: none,
++                          hintText: "Search Your Library",
++                          hintStyle: textTheme.titleMedium!.copyWith(
++                              fontWeight: FontWeight.w700,
++                              color: textTheme.titleSmall!.color),
++                        ),
++                      ),
++                    ),
++                  ),
++                ],
++              ),
++            ),
++          ),
++        ],
++      ),
++    );
++  }
++}
 diff --git a/lib/ui/widgets/song_list_tile.dart b/lib/ui/widgets/song_list_tile.dart
-index c38e3da..3b83d64 100644
 --- a/lib/ui/widgets/song_list_tile.dart
 +++ b/lib/ui/widgets/song_list_tile.dart
-@@ -21,12 +21,16 @@ class SongListTile extends StatelessWidget with RemoveSongFromPlaylistMixin {
+@@ -21,12 +21,20 @@ class SongListTile extends StatelessWidget with RemoveSongFromPlaylistMixin {
        this.playlist,
        this.isPlaylistOrAlbum = false,
        this.thumbReplacementWithIndex = false,
 +      this.compact = false,
++      this.showThumb = false,
        this.index});
    final Playlist? playlist;
    final MediaItem song;
@@ -1711,10 +2585,13 @@ index c38e3da..3b83d64 100644
 +  /// Spotify-like row: no thumbnail/number, always shows the 3-dot menu
 +  final bool compact;
 +
++  /// with [compact]: keep a small thumbnail (playlists), albums hide it
++  final bool showThumb;
++
    /// Valid for Album songs
    final bool thumbReplacementWithIndex;
    final int? index;
-@@ -127,8 +131,11 @@ class SongListTile extends StatelessWidget with RemoveSongFromPlaylistMixin {
+@@ -127,8 +135,15 @@ class SongListTile extends StatelessWidget with RemoveSongFromPlaylistMixin {
                  ),
                ).whenComplete(() => Get.delete<SongInfoController>());
              },
@@ -1722,13 +2599,17 @@ index c38e3da..3b83d64 100644
 -            leading: thumbReplacementWithIndex
 +            contentPadding: EdgeInsets.only(
 +                top: 0, left: compact ? 15 : 5, right: compact ? 4 : 30),
++            dense: compact,
++            visualDensity:
++                compact ? const VisualDensity(horizontal: 0, vertical: -2) : null,
++            minVerticalPadding: compact ? 2 : null,
 +            leading: compact
-+                ? null
++                ? (showThumb ? ImageWidget(size: 48, song: song) : null)
 +                : thumbReplacementWithIndex
                  ? SizedBox(
                      width: 27.5,
                      height: 55,
-@@ -147,20 +154,47 @@ class SongListTile extends StatelessWidget with RemoveSongFromPlaylistMixin {
+@@ -147,20 +162,53 @@ class SongListTile extends StatelessWidget with RemoveSongFromPlaylistMixin {
                delay: const Duration(milliseconds: 300),
                duration: const Duration(seconds: 5),
                id: song.title.hashCode.toString(),
@@ -1748,15 +2629,22 @@ index c38e3da..3b83d64 100644
 +                      : song.title,
 +                  maxLines: 1,
 +                  style: Theme.of(context).textTheme.titleMedium!.copyWith(
++                      fontSize: compact ? 15.5 : null,
 +                      color: playing ? const Color(0xFF1DB954) : null,
-+                      fontWeight: playing ? FontWeight.w700 : null),
++                      fontWeight: playing
++                          ? FontWeight.w700
++                          : (compact ? FontWeight.w400 : null)),
 +                );
 +              }),
              ),
              subtitle: Text(
                "${song.artist}",
                maxLines: 1,
-               style: Theme.of(context).textTheme.titleSmall,
+-              style: Theme.of(context).textTheme.titleSmall,
++              style: Theme.of(context)
++                  .textTheme
++                  .titleSmall!
++                  .copyWith(fontSize: compact ? 13 : null),
              ),
 -            trailing: SizedBox(
 +            trailing: compact
@@ -1784,3 +2672,83 @@ index c38e3da..3b83d64 100644
                width: Get.size.width > 800 ? 80 : 40,
                child: Row(
                  mainAxisAlignment: MainAxisAlignment.end,
+diff --git a/lib/ui/widgets/sort_widget.dart b/lib/ui/widgets/sort_widget.dart
+--- a/lib/ui/widgets/sort_widget.dart
++++ b/lib/ui/widgets/sort_widget.dart
+@@ -5,7 +5,7 @@ import 'package:get/get.dart';
+ import 'package:harmonymusic/ui/screens/Library/library_controller.dart';
+ 
+ import 'additional_operation_dialog.dart';
+-import 'modified_text_field.dart';
++import 'library_search_overlay.dart';
+ 
+ enum OperationMode { arrange, delete, addToPlaylist, none }
+ 
+@@ -234,6 +234,17 @@ class SortWidget extends StatelessWidget {
+                         onPressed: () {
+                           onSearchStart!(tag);
+                           controller.toggleSearch();
++                          LibrarySearchOverlay.open(
++                            context,
++                            textController: controller.textEditingController,
++                            onChanged: (value) => onSearch!(value, tag),
++                            onClose: () {
++                              if (controller.isSearchingEnabled.value) {
++                                controller.toggleSearch();
++                              }
++                              onSearchClose!(tag);
++                            },
++                          );
+                         },
+                       ),
+                     if (isAdditionalOperationRequired)
+@@ -278,46 +289,10 @@ class SortWidget extends StatelessWidget {
+                     )
+                   ],
+                 ),
++              // the search itself lives in LibrarySearchOverlay (top tab);
++              // keep room for its bar so results aren't hidden under it
+               if (controller.isSearchingEnabled.value)
+-                Container(
+-                  height: 40,
+-                  padding: const EdgeInsets.only(left: 5, right: 20),
+-                  // color:
+-                  //     Theme.of(context).scaffoldBackgroundColor.withAlpha(125),
+-                  child: ColoredBox(
+-                    color: Theme.of(context)
+-                        .scaffoldBackgroundColor
+-                        .withAlpha(125),
+-                    child: ModifiedTextField(
+-                      controller: controller.textEditingController,
+-                      textAlignVertical: TextAlignVertical.center,
+-                      autofocus: true,
+-                      onChanged: (value) {
+-                        onSearch!(value, tag);
+-                      },
+-                      cursorColor:
+-                          Theme.of(context).textTheme.titleSmall!.color,
+-                      decoration: InputDecoration(
+-                        isDense: true,
+-                        contentPadding: const EdgeInsets.all(8),
+-                        filled: true,
+-                        border: const OutlineInputBorder(),
+-                        hintText: "search".tr,
+-                        suffixIconColor:
+-                            Theme.of(context).colorScheme.secondary,
+-                        suffixIcon: IconButton(
+-                          splashRadius: 10,
+-                          iconSize: 20,
+-                          icon: const Icon(Icons.cancel),
+-                          onPressed: () {
+-                            controller.toggleSearch();
+-                            onSearchClose!(tag);
+-                          },
+-                        ),
+-                      ),
+-                    ),
+-                  ),
+-                ),
++                SizedBox(height: LibrarySearchOverlay.spacerHeight),
+             ],
+           ),
+         ),
