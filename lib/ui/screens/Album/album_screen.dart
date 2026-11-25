@@ -3,7 +3,6 @@ import 'package:flutter/material.dart';
 import 'package:get/get.dart';
 import 'package:harmonymusic/models/playling_from.dart';
 import 'package:harmonymusic/ui/widgets/playlist_album_scroll_behaviour.dart';
-import 'package:share_plus/share_plus.dart';
 import 'package:widget_marquee/widget_marquee.dart';
 
 import '../../player/player_controller.dart';
