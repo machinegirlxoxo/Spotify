@@ -189,7 +189,7 @@ class PlaylistScreen extends StatelessWidget {
                           behavior: PlaylistAlbumScrollBehaviour(),
                           child: ListView.builder(
                             addRepaintBoundaries: false,
-                            padding: EdgeInsets.only(
+                            padding: const EdgeInsets.only(
                               top: 0,
                               bottom: 200,
                             ),

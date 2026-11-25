@@ -52,7 +52,7 @@ class StreamProvider {
       } else if (e is VideoUnplayableException) {
         return StreamProvider(
           playable: false,
-          statusMSG: null ?? "Song is unplayable",
+          statusMSG: "Song is unplayable",
         );
       } else if (e is VideoRequiresPurchaseException) {
         return StreamProvider(
@@ -124,7 +124,7 @@ class StreamProvider {
       printINFO('Download completed successfully!');
 
     } catch(e) {
-      print(e);
+      printERROR(e.toString());
       rethrow;
     } finally {
       yt.close();

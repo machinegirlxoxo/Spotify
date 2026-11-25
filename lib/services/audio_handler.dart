@@ -857,7 +857,6 @@ class MyAudioHandler extends BaseAudioHandler with GetxServiceMixin {
         final token = RootIsolateToken.instance;
         final streamInfoJson =
             await Isolate.run(() => getStreamInfo(songId, token));
-        print(streamInfoJson);
         streamInfo = HMStreamingData.fromJson(streamInfoJson);
         if (streamInfo.playable) songsUrlCacheBox.put(songId, streamInfoJson);
       }

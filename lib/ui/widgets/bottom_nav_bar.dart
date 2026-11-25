@@ -30,7 +30,7 @@ class BottomNavBar extends StatelessWidget {
         child: NavigationBar(
             onDestinationSelected: homeScreenController.onBottonBarTabSelected,
             selectedIndex: homeScreenController.tabIndex.toInt(),
-            backgroundColor: const Color(0xFF121212).withOpacity(0.96),
+            backgroundColor: const Color(0xFF121212).withValues(alpha: 0.96),
             surfaceTintColor: Colors.transparent,
             shadowColor: Colors.transparent,
             indicatorColor: Colors.transparent,

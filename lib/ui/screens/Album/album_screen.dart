@@ -103,7 +103,7 @@ class AlbumScreen extends StatelessWidget {
                         () => ScrollConfiguration(
                           behavior: PlaylistAlbumScrollBehaviour(),
                           child: ListView.builder(
-                            padding: EdgeInsets.only(
+                            padding: const EdgeInsets.only(
                               top: 0,
                               bottom: 200,
                             ),

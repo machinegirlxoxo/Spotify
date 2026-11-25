@@ -63,17 +63,15 @@ class AddToPlaylist extends StatelessWidget {
               ),
               if (isPipedLinked)
                 Obx(
-                  () => Row(
+                  () => RadioGroup<String>(
+                    groupValue: addToPlaylistController.playlistType.value,
+                    onChanged: addToPlaylistController.changePlaylistType,
+                    child: Row(
                     mainAxisAlignment: MainAxisAlignment.start,
                     children: [
                       Row(
                         children: [
-                          Radio(
-                              value: "piped",
-                              groupValue:
-                                  addToPlaylistController.playlistType.value,
-                              onChanged:
-                                  addToPlaylistController.changePlaylistType),
+                          Radio<String>(value: "piped"),
                           Text("Piped".tr),
                         ],
                       ),
@@ -82,17 +80,12 @@ class AddToPlaylist extends StatelessWidget {
                       ),
                       Row(
                         children: [
-                          Radio(
-                              value: "local",
-                              groupValue:
-                                  addToPlaylistController.playlistType.value,
-                              onChanged:
-                                  addToPlaylistController.changePlaylistType),
+                          Radio<String>(value: "local"),
                           Text("local".tr),
                         ],
                       )
                     ],
-                  ),
+                  )),
                 ),
               Container(
                 decoration: BoxDecoration(

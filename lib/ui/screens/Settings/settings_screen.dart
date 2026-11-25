@@ -836,14 +836,14 @@ Widget radioWidget(
             Navigator.of(Get.context!).pop();
           }
         },
-        leading: Radio(
-            value: value,
+        leading: RadioGroup<dynamic>(
             groupValue: value.runtimeType == ThemeType
                 ? controller.themeModetype.value
                 : controller.discoverContentType.value,
             onChanged: value.runtimeType == ThemeType
                 ? controller.onThemeChange
-                : controller.onContentChange),
+                : controller.onContentChange,
+            child: Radio<dynamic>(value: value)),
         title: Text(label),
       ));
 }
