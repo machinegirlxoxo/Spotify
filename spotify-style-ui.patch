@@ -997,7 +997,8 @@ index 0000000..7748419
 +                  decoration: const BoxDecoration(
 +                      color: _green, shape: BoxShape.circle),
 +                  child: const Icon(Icons.check, size: 17, color: Colors.black),
-+                )+              : const Icon(Icons.add_circle_outline, size: 28),
++                )
++              : const Icon(Icons.add_circle_outline, size: 28),
 +        ),
 +        if (widget.onRemove != null)
 +          IconButton(
