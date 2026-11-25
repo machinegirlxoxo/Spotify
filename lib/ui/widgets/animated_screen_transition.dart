@@ -1,6 +1,8 @@
 import 'package:animations/animations.dart';
 import 'package:flutter/material.dart';
 
+/// Tab switch: current tab fades out to black, next tab fades in.
+/// (the horizontal/reverse flags are kept for API compatibility)
 class AnimatedScreenTransition extends StatelessWidget {
   const AnimatedScreenTransition(
       {super.key,
@@ -16,41 +18,15 @@ class AnimatedScreenTransition extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     if (!enabled) return child;
-    Tween<Offset> forwardTween;
-    Tween<Offset> reverseTween;
-    if (horizontalTransition) {
-      forwardTween = resverse
-          ? Tween<Offset>(begin: Offset.zero, end: const Offset(-1, 0))
-          : Tween<Offset>(begin: Offset.zero, end: const Offset(1, 0));
-      reverseTween = resverse
-          ? Tween<Offset>(begin: const Offset(1, 0), end: Offset.zero)
-          : Tween<Offset>(begin: const Offset(-1, 0), end: Offset.zero);
-    } else {
-      forwardTween = resverse
-          ? Tween<Offset>(begin: Offset.zero, end: const Offset(0, -1))
-          : Tween<Offset>(begin: Offset.zero, end: const Offset(0, 1));
-      reverseTween = resverse
-          ? Tween<Offset>(begin: const Offset(0, 1), end: Offset.zero)
-          : Tween<Offset>(begin: const Offset(0, -1), end: Offset.zero);
-    }
     return PageTransitionSwitcher(
-      duration: horizontalTransition
-          ? const Duration(milliseconds: 400)
-          : const Duration(milliseconds: 450),
-      transitionBuilder: (child, primaryAnimation, secondaryAnimation) {
-        return DualTransitionBuilder(
-          animation: primaryAnimation,
-          forwardBuilder: (context, animation, child) => SlideTransition(
-            position: forwardTween.animate(CurvedAnimation(parent: primaryAnimation, curve: Curves.easeOutCubic)),
-            child: child,
-          ),
-          reverseBuilder: (context, animation, child) => SlideTransition(
-            position: reverseTween.animate(CurvedAnimation(parent: secondaryAnimation, curve: Curves.easeOutCubic)),
-            child: child,
-          ),
-          child: child,
-        );
-      },
+      duration: const Duration(milliseconds: 350),
+      transitionBuilder: (child, primaryAnimation, secondaryAnimation) =>
+          FadeThroughTransition(
+        animation: primaryAnimation,
+        secondaryAnimation: secondaryAnimation,
+        fillColor: Colors.black,
+        child: child,
+      ),
       child: child,
     );
   }
