@@ -1,12 +1,6 @@
 name: Build APK
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths:
-      - 'spotify-style-ui.patch'
-      - 'spotify_login_full_ui (1).patch'
-      - '.github/workflows/build-apk.yml'
 
 jobs:
   build:
