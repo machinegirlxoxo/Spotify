@@ -5,7 +5,7 @@ import 'package:get/get.dart';
 import 'package:harmonymusic/ui/screens/Library/library_controller.dart';
 
 import 'additional_operation_dialog.dart';
-import 'modified_text_field.dart';
+import 'library_search_overlay.dart';
 
 enum OperationMode { arrange, delete, addToPlaylist, none }
 
@@ -234,6 +234,17 @@ class SortWidget extends StatelessWidget {
                         onPressed: () {
                           onSearchStart!(tag);
                           controller.toggleSearch();
+                          LibrarySearchOverlay.open(
+                            context,
+                            textController: controller.textEditingController,
+                            onChanged: (value) => onSearch!(value, tag),
+                            onClose: () {
+                              if (controller.isSearchingEnabled.value) {
+                                controller.toggleSearch();
+                              }
+                              onSearchClose!(tag);
+                            },
+                          );
                         },
                       ),
                     if (isAdditionalOperationRequired)
@@ -278,46 +289,10 @@ class SortWidget extends StatelessWidget {
                     )
                   ],
                 ),
+              // the search itself lives in LibrarySearchOverlay (top tab);
+              // keep room for its bar so results aren't hidden under it
               if (controller.isSearchingEnabled.value)
-                Container(
-                  height: 40,
-                  padding: const EdgeInsets.only(left: 5, right: 20),
-                  // color:
-                  //     Theme.of(context).scaffoldBackgroundColor.withAlpha(125),
-                  child: ColoredBox(
-                    color: Theme.of(context)
-                        .scaffoldBackgroundColor
-                        .withAlpha(125),
-                    child: ModifiedTextField(
-                      controller: controller.textEditingController,
-                      textAlignVertical: TextAlignVertical.center,
-                      autofocus: true,
-                      onChanged: (value) {
-                        onSearch!(value, tag);
-                      },
-                      cursorColor:
-                          Theme.of(context).textTheme.titleSmall!.color,
-                      decoration: InputDecoration(
-                        isDense: true,
-                        contentPadding: const EdgeInsets.all(8),
-                        filled: true,
-                        border: const OutlineInputBorder(),
-                        hintText: "search".tr,
-                        suffixIconColor:
-                            Theme.of(context).colorScheme.secondary,
-                        suffixIcon: IconButton(
-                          splashRadius: 10,
-                          iconSize: 20,
-                          icon: const Icon(Icons.cancel),
-                          onPressed: () {
-                            controller.toggleSearch();
-                            onSearchClose!(tag);
-                          },
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
+                SizedBox(height: LibrarySearchOverlay.spacerHeight),
             ],
           ),
         ),
