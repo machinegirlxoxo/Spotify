@@ -3,6 +3,7 @@ import 'dart:ui';
 
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
+import 'package:widget_marquee/widget_marquee.dart';
 
 import '../../widgets/songinfo_bottom_sheet.dart';
 import '../player_controller.dart';
