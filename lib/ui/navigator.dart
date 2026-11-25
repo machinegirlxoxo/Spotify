@@ -11,6 +11,32 @@ import 'screens/Playlist/playlist_screen.dart';
 import 'screens/Search/search_result_screen.dart';
 import 'screens/Search/search_screen.dart';
 
+/// Old page fades to black, then the new page fades in (no slide).
+class FadeThroughBlackTransition extends CustomTransition {
+  @override
+  Widget buildTransition(
+      BuildContext context,
+      Curve? curve,
+      Alignment? alignment,
+      Animation<double> animation,
+      Animation<double> secondaryAnimation,
+      Widget child) {
+    final fadeIn = CurvedAnimation(
+        parent: animation,
+        curve: const Interval(0.5, 1.0, curve: Curves.easeOut));
+    final fadeOut = ReverseAnimation(CurvedAnimation(
+        parent: secondaryAnimation,
+        curve: const Interval(0.0, 0.5, curve: Curves.easeIn)));
+    return FadeTransition(
+      opacity: fadeIn,
+      child: ColoredBox(
+        color: Colors.black,
+        child: FadeTransition(opacity: fadeOut, child: child),
+      ),
+    );
+  }
+}
+
 class ScreenNavigationSetup {
   ScreenNavigationSetup._();
 
@@ -37,7 +63,9 @@ class ScreenNavigation extends StatelessWidget {
 
             case ScreenNavigationSetup.homeScreen:
               return GetPageRoute(
-                  page: () => const HomeScreen(), settings: settings);
+                  page: () => const HomeScreen(), settings: settings,
+                  customTransition: FadeThroughBlackTransition(),
+                  transitionDuration: const Duration(milliseconds: 350));
             
             case ScreenNavigationSetup.albumScreen:
               final id = (settings.arguments as (Album?, String)).$2;
@@ -45,7 +73,9 @@ class ScreenNavigation extends StatelessWidget {
                   page: () => AlbumScreen(
                         key: Key(id),
                       ),
-                  settings: settings);
+                  settings: settings,
+                  customTransition: FadeThroughBlackTransition(),
+                  transitionDuration: const Duration(milliseconds: 350));
             
             case ScreenNavigationSetup.playlistScreen:
              final id = (settings.arguments as List)[1] as String;
@@ -53,15 +83,21 @@ class ScreenNavigation extends StatelessWidget {
                   page: () => PlaylistScreen(
                         key: Key(id),
                       ),
-                  settings: settings);
+                  settings: settings,
+                  customTransition: FadeThroughBlackTransition(),
+                  transitionDuration: const Duration(milliseconds: 350));
             
             case ScreenNavigationSetup.searchScreen:
               return GetPageRoute(
-                  page: () => const SearchScreen(), settings: settings);
+                  page: () => const SearchScreen(), settings: settings,
+                  customTransition: FadeThroughBlackTransition(),
+                  transitionDuration: const Duration(milliseconds: 350));
             
             case ScreenNavigationSetup.searchResultScreen:
               return GetPageRoute(
-                  page: () => const SearchResultScreen(), settings: settings);
+                  page: () => const SearchResultScreen(), settings: settings,
+                  customTransition: FadeThroughBlackTransition(),
+                  transitionDuration: const Duration(milliseconds: 350));
             
             case ScreenNavigationSetup.artistScreen:
               final args = settings.arguments as List;
@@ -70,7 +106,9 @@ class ScreenNavigation extends StatelessWidget {
                   page: () => ArtistScreen(
                         key: Key(id),
                       ),
-                  settings: settings);
+                  settings: settings,
+                  customTransition: FadeThroughBlackTransition(),
+                  transitionDuration: const Duration(milliseconds: 350));
             
             default:
               return null;
