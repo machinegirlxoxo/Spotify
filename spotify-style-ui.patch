@@ -875,7 +875,7 @@ new file mode 100644
 index 0000000..7748419
 --- /dev/null
 +++ b/lib/ui/screens/Search/components/search_song_tile.dart
-@@ -0,0 +1,133 @@
+@@ -0,0 +1,134 @@
 +import 'package:audio_service/audio_service.dart';
 +import 'package:flutter/material.dart';
 +import 'package:get/get.dart';
