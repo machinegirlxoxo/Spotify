@@ -28,6 +28,45 @@ class PlayerController extends GetxController
   final currentQueue = <MediaItem>[].obs;
 
   final playerPaneOpacity = (1.0).obs;
+
+  /// black overlay used to fade the player in/out (instead of sliding)
+  final fadeOverlay = 0.0.obs;
+  final fadeOverlayDuration = Duration.zero.obs;
+  bool _fadingPlayer = false;
+
+  Future<void> _fadeThroughBlack(Future<void> Function() change) async {
+    if (_fadingPlayer) return;
+    _fadingPlayer = true;
+    fadeOverlayDuration.value = const Duration(milliseconds: 160);
+    fadeOverlay.value = 1.0;
+    await Future.delayed(const Duration(milliseconds: 170));
+    await change();
+    await Future.delayed(const Duration(milliseconds: 40));
+    fadeOverlayDuration.value = const Duration(milliseconds: 220);
+    fadeOverlay.value = 0.0;
+    await Future.delayed(const Duration(milliseconds: 230));
+    _fadingPlayer = false;
+  }
+
+  /// miniplayer -> full player: fade to black, then fade in
+  Future<void> openPlayerFade() async {
+    if (!playerPanelController.isAttached ||
+        playerPanelController.isPanelOpen) {
+      return;
+    }
+    await _fadeThroughBlack(() => playerPanelController
+        .animatePanelToPosition(1.0, duration: Duration.zero));
+  }
+
+  /// full player -> miniplayer: fade to black, then fade in
+  Future<void> closePlayerFade() async {
+    if (!playerPanelController.isAttached ||
+        playerPanelController.isPanelClosed) {
+      return;
+    }
+    await _fadeThroughBlack(() => playerPanelController
+        .animatePanelToPosition(0.0, duration: Duration.zero));
+  }
   final isPlayerpanelTopVisible = true.obs;
   final isPanelGTHOpened = false.obs;
   final playerPanelMinHeight = 0.0.obs;
@@ -501,10 +540,10 @@ class PlayerController extends GetxController
 
   void _playerPanelCheck({bool restoreSession = false}) {
     final isWideScreen = Get.size.width > 800;
-    final autoOpenPlayer = Hive.box("AppPrefs").get("autoOpenPlayer") ?? true;
+    final autoOpenPlayer = Hive.box("AppPrefs").get("autoOpenPlayer") ?? false;
     if ((!isWideScreen && autoOpenPlayer && playerPanelController.isAttached) &&
         !restoreSession) {
-      playerPanelController.open();
+      openPlayerFade();
     }
 
     if (initFlagForPlayer) {

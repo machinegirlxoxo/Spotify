@@ -54,16 +54,15 @@ class CreateNRenamePlaylistPopup extends StatelessWidget {
               ),
               if (isPipedLinked && !renamePlaylist)
                 Obx(
-                  () => Row(
+                  () => RadioGroup<String>(
+                    groupValue: librPlstCntrller.playlistCreationMode.value,
+                    onChanged: librPlstCntrller.changeCreationMode,
+                    child: Row(
                     mainAxisAlignment: MainAxisAlignment.start,
                     children: [
                       Row(
                         children: [
-                          Radio(
-                              value: "piped",
-                              groupValue:
-                                  librPlstCntrller.playlistCreationMode.value,
-                              onChanged: librPlstCntrller.changeCreationMode),
+                          const Radio<String>(value: "piped"),
                           Text("Piped".tr),
                         ],
                       ),
@@ -72,16 +71,12 @@ class CreateNRenamePlaylistPopup extends StatelessWidget {
                       ),
                       Row(
                         children: [
-                          Radio(
-                              value: "local",
-                              groupValue:
-                                  librPlstCntrller.playlistCreationMode.value,
-                              onChanged: librPlstCntrller.changeCreationMode),
+                          const Radio<String>(value: "local"),
                           Text("local".tr),
                         ],
                       )
                     ],
-                  ),
+                  )),
                 ),
               ModifiedTextField(
                 textCapitalization: TextCapitalization.sentences,

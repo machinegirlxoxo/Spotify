@@ -1,5 +1,6 @@
 import 'dart:io';
 import 'package:audio_service/audio_service.dart';
+import 'package:flutter/foundation.dart' show compute;
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
 import 'package:harmonymusic/ui/widgets/snackbar.dart';
@@ -254,13 +255,13 @@ class LibraryPlaylistsController extends GetxController
 
   void refreshLib() async {
     final box = await Hive.openBox("LibraryPlaylists");
-    libraryPlaylists.value = [
+    libraryPlaylists.value = _recentsFirst([
       ...initPlst,
       ...(box.values
           .map<Playlist?>((item) => Playlist.fromJson(item))
           .whereType<Playlist>()
           .toList())
-    ];
+    ]);
 
     final appPrefsBox = Hive.box("AppPrefs");
     if (appPrefsBox.containsKey("piped")) {
@@ -269,6 +270,39 @@ class LibraryPlaylistsController extends GetxController
 
     isContentFetched.value = true;
     await box.close();
+  }
+
+  /// playlistId -> last played/opened time (ms since epoch)
+  Map<String, int> _lastPlayedMap() {
+    final raw = Hive.box("AppPrefs").get("playlistLastPlayed");
+    if (raw is Map) {
+      return raw.map((k, v) => MapEntry(k.toString(), (v as num).toInt()));
+    }
+    return {};
+  }
+
+  /// Most recently played playlists first, others keep their order.
+  List<Playlist> _recentsFirst(List<Playlist> list) {
+    final lp = _lastPlayedMap();
+    final indexed = list.asMap().entries.toList();
+    indexed.sort((a, b) {
+      final ta = lp[a.value.playlistId] ?? 0;
+      final tb = lp[b.value.playlistId] ?? 0;
+      if (ta != tb) return tb.compareTo(ta);
+      return a.key.compareTo(b.key);
+    });
+    return indexed.map((e) => e.value).toList();
+  }
+
+  /// Call when a playlist is played/opened so it moves to the top.
+  void markPlayed(String playlistId) {
+    final lp = _lastPlayedMap();
+    lp[playlistId] = DateTime.now().millisecondsSinceEpoch;
+    Hive.box("AppPrefs").put("playlistLastPlayed", lp);
+    final current = libraryPlaylists.toList();
+    if (current.any((e) => e.playlistId == playlistId)) {
+      libraryPlaylists.value = _recentsFirst(current);
+    }
   }
 
   void updatePlaylistIntoDb(Playlist playlist) async {
@@ -428,8 +462,10 @@ class LibraryPlaylistsController extends GetxController
   }
 
   void onSort(SortType sortType, bool isAscending) {
-    final playlists = libraryPlaylists.toList();
-    playlists.removeRange(0, 4);
+    final initIds = initPlst.map((e) => e.playlistId).toSet();
+    final playlists = libraryPlaylists
+        .where((e) => !initIds.contains(e.playlistId))
+        .toList();
     sortPlayLists(playlists, sortType, isAscending);
     playlists.insertAll(0, initPlst);
     libraryPlaylists.value = playlists;
@@ -459,45 +495,39 @@ class LibraryPlaylistsController extends GetxController
     super.dispose();
   }
 
+  /// Imports a playlist JSON file in the background: no dialog, the UI stays
+  /// usable. JSON is parsed in an isolate and all songs are written to the
+  /// database in a single batch (instead of one awaited write per song).
   Future<void> importPlaylistFromJson(BuildContext context) async {
     try {
-      isImporting.value = true;
-      importProgress.value = 0.1;
-
-      // Show progress dialog
-      if (context.mounted) {
-        _showImportProgressDialog(context);
-      }
-
       // Use file_picker to select JSON file
       final result = await FilePicker.platform.pickFiles(
         type: FileType.custom,
         allowedExtensions: ['json'],
         dialogTitle: 'importPlaylist'.tr,
       );
-
-      if (result == null || result.files.isEmpty) {
-        // User cancelled the picker
-        if (Get.isDialogOpen ?? false) {
-          Get.back();
-        }
-        isImporting.value = false;
-        importProgress.value = 0.0;
-        return;
-      }
-
-      importProgress.value = 0.2;
+      if (result == null || result.files.isEmpty) return;
 
       final file = File(result.files.single.path!);
       if (!await file.exists()) {
         throw FileSystemException("fileNotFound".tr);
       }
 
-      final jsonString = await file.readAsString();
-      importProgress.value = 0.3;
+      isImporting.value = true;
+      _importToast("importingPlaylist".tr);
+      _runPlaylistImport(file);
+    } catch (e) {
+      isImporting.value = false;
+      _importFailed(e);
+    }
+  }
 
-      final jsonData = jsonDecode(jsonString);
-      importProgress.value = 0.4;
+  // runs without blocking the UI
+  Future<void> _runPlaylistImport(File file) async {
+    try {
+      final jsonString = await file.readAsString();
+      final Map<String, dynamic> jsonData =
+          await compute(_decodePlaylistJson, jsonString);
 
       // Validate JSON structure
       if (!jsonData.containsKey('playlistInfo') ||
@@ -505,12 +535,9 @@ class LibraryPlaylistsController extends GetxController
         throw FormatException("invalidPlaylistFile".tr);
       }
 
-      // Create new playlist ID
       final playlistInfo = jsonData['playlistInfo'];
       final newPlaylistId = "LIB${DateTime.now().millisecondsSinceEpoch}";
-      importProgress.value = 0.5;
 
-      // Create playlist object
       final newPlaylist = Playlist(
         title: "${playlistInfo['title']} (${"imported".tr})",
         playlistId: newPlaylistId,
@@ -522,114 +549,55 @@ class LibraryPlaylistsController extends GetxController
         description: playlistInfo['description'] ?? "importedPlaylist".tr,
         isCloudPlaylist: false,
       );
-      importProgress.value = 0.6;
 
-      // Save playlist to database
-      final box = await Hive.openBox("LibraryPlaylists");
-      box.put(newPlaylistId, newPlaylist.toJson());
-      importProgress.value = 0.7;
-
-      // Save songs to playlist
-      final songsBox = await Hive.openBox(newPlaylistId);
+      // songs: one batched write
       final songsList = jsonData['songs'] as List;
-
-      // Update progress as songs are added
-      final totalSongs = songsList.length;
-      for (int i = 0; i < totalSongs; i++) {
-        await songsBox.put(i, songsList[i]);
-        // Update progress from 70% to 95% based on song import progress
-        importProgress.value = 0.7 + (0.25 * (i + 1) / totalSongs);
-      }
-
+      final songsBox = await Hive.openBox(newPlaylistId);
+      await songsBox.putAll(songsList.asMap());
       await songsBox.close();
-      await box.close();
-      importProgress.value = 1.0;
 
-      // Close progress dialog if it's still open
-      if (Get.isDialogOpen ?? false) {
-        Get.back();
-      }
+      final box = await Hive.openBox("LibraryPlaylists");
+      await box.put(newPlaylistId, newPlaylist.toJson());
+      await box.close();
 
       // Refresh library to show the new playlist
       refreshLib();
-
-      ScaffoldMessenger.of(Get.context!).showSnackBar(snackbar(
-          Get.context!, 
-          "Playlist imported successfully", 
-          size: SanckBarSize.BIG,
-          duration: const Duration(seconds: 2),
-          top: !GetPlatform.isDesktop)
-      );
-      
+      _importToast("Playlist imported successfully");
     } catch (e) {
-      // Close progress dialog if it's still open
-      if (Get.isDialogOpen ?? false) {
-        Get.back();
-      }
-
-      printERROR("Error importing playlist: $e");
-
-      String errorMsg = "importError".tr;
-      if (e is FileSystemException) {
-        errorMsg = "importErrorFileAccess".tr;
-      } else if (e is FormatException) {
-        errorMsg = "importErrorFormat".tr;
-      } else if (e.toString().contains("invalidPlaylistFile")) {
-        errorMsg = "invalidPlaylistFile".tr;
-      } else if (e is HiveError) {
-        errorMsg = "importErrorDatabase".tr;
-      }
-
-      ScaffoldMessenger.of(Get.context!).showSnackBar(snackbar(
-          Get.context!, 
-          errorMsg, 
-          size: SanckBarSize.BIG,
-          duration: const Duration(seconds: 2),
-          top: !GetPlatform.isDesktop)
-      );
+      _importFailed(e);
     } finally {
       isImporting.value = false;
-      importProgress.value = 0.0;
     }
   }
 
-  // Helper method to show import progress dialog
-  void _showImportProgressDialog(BuildContext context) {
-    Get.dialog(
-      AlertDialog(
-        backgroundColor: Theme.of(context).cardColor,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(15),
-        ),
-        title: Text(
-          "importingPlaylist".tr,
-          style: Theme.of(context).textTheme.titleLarge,
-        ),
-        content: Obx(() => Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                LinearProgressIndicator(
-                  value: Get.isRegistered<LibraryPlaylistsController>()
-                      ? importProgress.value
-                      : 0,
-                  backgroundColor:
-                      Theme.of(context).colorScheme.surfaceContainerHighest,
-                  valueColor: AlwaysStoppedAnimation<Color>(
-                    Theme.of(context).colorScheme.secondary,
-                  ),
-                ),
-                const SizedBox(height: 16),
-                Text(
-                  "${(Get.isRegistered<LibraryPlaylistsController>() ? importProgress.value * 100 : 0).toInt()}%",
-                  style: Theme.of(context).textTheme.bodyMedium,
-                ),
-              ],
-            )),
-      ),
-      barrierDismissible: false,
-    );
+  void _importToast(String msg) {
+    final ctx = Get.context;
+    if (ctx == null) return;
+    ScaffoldMessenger.of(ctx).showSnackBar(snackbar(ctx, msg,
+        size: SanckBarSize.BIG,
+        duration: const Duration(seconds: 2),
+        top: !GetPlatform.isDesktop));
+  }
+
+  void _importFailed(Object e) {
+    printERROR("Error importing playlist: $e");
+    String errorMsg = "importError".tr;
+    if (e is FileSystemException) {
+      errorMsg = "importErrorFileAccess".tr;
+    } else if (e is FormatException) {
+      errorMsg = "importErrorFormat".tr;
+    } else if (e.toString().contains("invalidPlaylistFile")) {
+      errorMsg = "invalidPlaylistFile".tr;
+    } else if (e is HiveError) {
+      errorMsg = "importErrorDatabase".tr;
+    }
+    _importToast(errorMsg);
   }
 }
+
+/// top-level so it can run in an isolate via compute()
+Map<String, dynamic> _decodePlaylistJson(String source) =>
+    Map<String, dynamic>.from(jsonDecode(source) as Map);
 
 class LibraryAlbumsController extends GetxController {
   late RxList<Album> libraryAlbums = RxList();

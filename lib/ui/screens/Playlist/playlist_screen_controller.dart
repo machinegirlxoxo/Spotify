@@ -152,6 +152,12 @@ class PlaylistScreenController extends PlaylistAlbumScreenControllerBase
     });
   }
 
+  void markPlayed() {
+    final id = playlist.value.playlistId;
+    if (id.isEmpty) return;
+    Get.find<LibraryPlaylistsController>().markPlayed(id);
+  }
+
   @override
   Future<bool> checkIfAddedToLibrary(String id) async {
     final box = await Hive.openBox("LibraryPlaylists");
@@ -174,12 +180,12 @@ class PlaylistScreenController extends PlaylistAlbumScreenControllerBase
         final box = await Hive.openBox("LibraryPlaylists");
         final id = content.playlistId;
         if (add) {
-          box.put(id, content.toJson());
-          updateSongsIntoDb();
+          await box.put(id, content.toJson());
+          await updateSongsIntoDb();
         } else {
-          box.delete(id);
+          await box.delete(id);
           final songsBox = await Hive.openBox(id);
-          songsBox.deleteFromDisk();
+          await songsBox.deleteFromDisk();
         }
         isAddedToLibrary.value = add;
       }

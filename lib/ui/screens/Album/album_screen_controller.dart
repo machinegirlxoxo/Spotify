@@ -58,30 +58,35 @@ class AlbumScreenController extends PlaylistAlbumScreenControllerBase
         album.value = album_;
         animationController.forward();
       }
-      // Check if the album is offline
-      if (!await checkIfAddedToLibrary(albumId)) {
-        // Fetch album details online
+      // Check if the album is saved in library and has songs stored
+      final added = await checkIfAddedToLibrary(albumId);
+      List<MediaItem> offlineSongs = [];
+      if (added) {
+        final box = await Hive.openBox(albumId);
+        offlineSongs = box.values
+            .map<MediaItem?>((item) => MediaItemBuilder.fromJson(item))
+            .whereType<MediaItem>()
+            .toList();
+        await box.close();
+      }
+      if (offlineSongs.isNotEmpty) {
+        songList.value = offlineSongs;
+      } else {
+        // not in library, or saved without songs -> fetch tracks online
         final content =
             await musicServices.getPlaylistOrAlbumSongs(albumId: albumId);
         content['browseId'] = albumId;
         album.value = Album.fromJson(content);
         animationController.forward();
         songList.value = List<MediaItem>.from(content['tracks']);
-      } else {
-        // If the album is offline, fetch the songs from the local database
-        // Album details are already fetched in _checkIfAddedToLibrary method
-        final box = await Hive.openBox(albumId);
-        songList.value = box.values
-            .map<MediaItem?>((item) => MediaItemBuilder.fromJson(item))
-            .whereType<MediaItem>()
-            .toList();
-        box.close();
+        if (added) updateSongsIntoDb();
       }
       checkDownloadStatus();
       isContentFetched.value = true;
     } catch (e) {
       // Handle any errors that occur during the fetch
       printERROR("Error fetching album details: $e");
+      isContentFetched.value = true;
     }
   }
 

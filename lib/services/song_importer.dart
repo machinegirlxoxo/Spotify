@@ -61,7 +61,6 @@ class SongImporter {
       final metadata = await MetadataRetriever.fromFile(File(originalFilePath));
       
       final cleanTitle = pickedFile.name.replaceAll(RegExp(r'\.[a-zA-Z0-9]+$'), '');
-      final String title = metadata.trackName ?? cleanTitle;
       final String artist = metadata.trackArtistNames?.join(', ') ?? 'Unknown Artist';
       final String album = metadata.albumName ?? 'Unknown Album';
       final int bitrate = metadata.bitrate ?? 320;

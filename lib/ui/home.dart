@@ -13,6 +13,7 @@ import 'player/components/mini_player.dart';
 import 'player/player_controller.dart';
 import 'widgets/bottom_nav_bar.dart';
 import 'widgets/scroll_to_hide.dart';
+import 'widgets/library_search_overlay.dart';
 import 'widgets/sliding_up_panel.dart';
 import 'widgets/snackbar.dart';
 import 'widgets/up_next_queue.dart';
@@ -42,8 +43,12 @@ class Home extends StatelessWidget {
       canPop: false,
       onPopInvokedWithResult: (didPop, result) async {
         if (didPop) return;
+        if (LibrarySearchOverlay.isOpen) {
+          LibrarySearchOverlay.close();
+          return;
+        }
         if (playerController.playerPanelController.isPanelOpen) {
-          playerController.playerPanelController.close();
+          playerController.closePlayerFade();
         } else {
           if (Get.nestedKey(ScreenNavigationSetup.id)!.currentState!.canPop()) {
             Get.nestedKey(ScreenNavigationSetup.id)!.currentState!.pop();
@@ -135,7 +140,7 @@ class Home extends StatelessWidget {
                                                           .isFalse
                                                       ? Colors.white24
                                                       : Colors.white
-                                                          .withOpacity(0.8),
+                                                          .withValues(alpha: 0.8),
                                                   borderRadius:
                                                       BorderRadius.circular(20),
                                                 ),
@@ -186,7 +191,8 @@ class Home extends StatelessWidget {
                     )
                   : null,
               drawerScrimColor: Colors.transparent,
-              body: Obx(() => SlidingUpPanel(
+              body: Stack(children: [
+                  Obx(() => SlidingUpPanel(
                     onPanelSlide: playerController.panellistener,
                     controller: playerController.playerPanelController,
                     minHeight: playerController.playerPanelMinHeight.value,
@@ -199,11 +205,22 @@ class Home extends StatelessWidget {
                     body: const ScreenNavigation(),
                     header: !isWideScreen
                         ? InkWell(
-                            onTap: playerController.playerPanelController.open,
+                            onTap: () => playerController.openPlayerFade(),
                             child: const MiniPlayer(),
                           )
                         : const MiniPlayer(),
-                  ))),
+                  )),
+                  // black overlay for the fade-through-black player open/close
+                  Positioned.fill(
+                    child: Obx(() => IgnorePointer(
+                          child: AnimatedOpacity(
+                            opacity: playerController.fadeOverlay.value,
+                            duration: playerController.fadeOverlayDuration.value,
+                            child: const ColoredBox(color: Colors.black),
+                          ),
+                        )),
+                  ),
+                ])),
         ),
       ),
     );

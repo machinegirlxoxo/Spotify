@@ -8,6 +8,7 @@ import '../../services/piped_service.dart';
 import '/models/media_Item_builder.dart';
 import '/ui/widgets/create_playlist_dialog.dart';
 import '../../models/playlist.dart';
+import '../screens/Library/library_controller.dart';
 import 'common_dialog_widget.dart';
 import 'snackbar.dart';
 
@@ -62,17 +63,15 @@ class AddToPlaylist extends StatelessWidget {
               ),
               if (isPipedLinked)
                 Obx(
-                  () => Row(
+                  () => RadioGroup<String>(
+                    groupValue: addToPlaylistController.playlistType.value,
+                    onChanged: addToPlaylistController.changePlaylistType,
+                    child: Row(
                     mainAxisAlignment: MainAxisAlignment.start,
                     children: [
                       Row(
                         children: [
-                          Radio(
-                              value: "piped",
-                              groupValue:
-                                  addToPlaylistController.playlistType.value,
-                              onChanged:
-                                  addToPlaylistController.changePlaylistType),
+                          const Radio<String>(value: "piped"),
                           Text("Piped".tr),
                         ],
                       ),
@@ -81,17 +80,12 @@ class AddToPlaylist extends StatelessWidget {
                       ),
                       Row(
                         children: [
-                          Radio(
-                              value: "local",
-                              groupValue:
-                                  addToPlaylistController.playlistType.value,
-                              onChanged:
-                                  addToPlaylistController.changePlaylistType),
+                          const Radio<String>(value: "local"),
                           Text("local".tr),
                         ],
                       )
                     ],
-                  ),
+                  )),
                 ),
               Container(
                 decoration: BoxDecoration(
@@ -179,6 +173,7 @@ class AddToPlaylistController extends GetxController {
         .whereType<Playlist>()
         .toList();
     localPlaylists = playlists.toList();
+    if (!Get.find<PipedServices>().isLoggedIn) return;
     final res = await Get.find<PipedServices>().getAllPlaylists();
     if (res.code == 1) {
       pipedPlaylists = res.response
@@ -212,6 +207,9 @@ class AddToPlaylistController extends GetxController {
       }
       await plstBox.close();
       additionInProgress.value = false;
+      if (Get.isRegistered<LibraryPlaylistsController>()) {
+        Get.find<LibraryPlaylistsController>().refreshLib();
+      }
       return true;
     } else {
       final videosId = songs.map((e) => e.id).toList();

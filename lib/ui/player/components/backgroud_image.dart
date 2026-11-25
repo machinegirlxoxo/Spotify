@@ -3,7 +3,6 @@ import 'dart:io';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
-import 'package:harmonymusic/utils/helper.dart';
 import 'package:hive_flutter/adapters.dart';
 
 import '../../screens/Settings/settings_screen_controller.dart';

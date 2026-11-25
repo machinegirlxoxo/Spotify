@@ -283,6 +283,7 @@ class MyAudioHandler extends BaseAudioHandler with GetxServiceMixin {
             url.contains("http"))) {
       printINFO("Playing Using LockCaching");
       isPlayingUsingLockCachingSource = true;
+      // ignore: experimental_member_use
       return LockCachingAudioSource(
         Uri.parse(url),
         cacheFile: File("$_cacheDir/cachedSongs/${mediaItem.id}.mp3"),
@@ -856,7 +857,6 @@ class MyAudioHandler extends BaseAudioHandler with GetxServiceMixin {
         final token = RootIsolateToken.instance;
         final streamInfoJson =
             await Isolate.run(() => getStreamInfo(songId, token));
-        print(streamInfoJson);
         streamInfo = HMStreamingData.fromJson(streamInfoJson);
         if (streamInfo.playable) songsUrlCacheBox.put(songId, streamInfoJson);
       }

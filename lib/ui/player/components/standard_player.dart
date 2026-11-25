@@ -3,6 +3,7 @@ import 'dart:ui';
 
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
+import 'package:widget_marquee/widget_marquee.dart';
 
 import '../../widgets/songinfo_bottom_sheet.dart';
 import '../player_controller.dart';
@@ -52,7 +53,7 @@ class StandardPlayer extends StatelessWidget {
               Positioned.fill(
                 child: Container(
                   decoration: BoxDecoration(
-                    color: Theme.of(context).primaryColor.withOpacity(0.8),
+                    color: Theme.of(context).primaryColor.withValues(alpha: 0.8),
                   ),
                 ),
               ),
@@ -68,8 +69,8 @@ class StandardPlayer extends StatelessWidget {
                       colors: [
                         Theme.of(context).primaryColor,
                         Theme.of(context).primaryColor,
-                        Theme.of(context).primaryColor.withOpacity(0.4),
-                        Theme.of(context).primaryColor.withOpacity(0),
+                        Theme.of(context).primaryColor.withValues(alpha: 0.4),
+                        Theme.of(context).primaryColor.withValues(alpha: 0),
                       ],
                       begin: Alignment.bottomCenter,
                       end: Alignment.topCenter,
@@ -180,7 +181,7 @@ class StandardPlayer extends StatelessWidget {
                     Icons.keyboard_arrow_down,
                     size: 28,
                   ),
-                  onPressed: playerController.playerPanelController.close,
+                  onPressed: () => playerController.closePlayerFade(),
                 ),
 
                 /// Playing from [Album name]
@@ -194,11 +195,18 @@ class StandardPlayer extends StatelessWidget {
                               style: const TextStyle(
                                   fontSize: 12, fontWeight: FontWeight.bold)),
                           Obx(
-                            () => Text(
-                              "\"${playerController.playinfrom.value.nameString}\"",
-                              overflow: TextOverflow.ellipsis,
-                              style:
-                                  const TextStyle(fontWeight: FontWeight.bold),
+                            () => Marquee(
+                              delay: const Duration(milliseconds: 300),
+                              duration: const Duration(seconds: 5),
+                              id: playerController.playinfrom.value.nameString
+                                  .hashCode
+                                  .toString(),
+                              child: Text(
+                                "\"${playerController.playinfrom.value.nameString}\"",
+                                maxLines: 1,
+                                style: const TextStyle(
+                                    fontWeight: FontWeight.bold),
+                              ),
                             ),
                           )
                         ],

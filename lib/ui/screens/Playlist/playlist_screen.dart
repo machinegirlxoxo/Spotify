@@ -1,12 +1,10 @@
 import 'package:audio_service/audio_service.dart';
-import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:widget_marquee/widget_marquee.dart';
 
 import '/models/playling_from.dart';
-import '/models/thumbnail.dart';
 import '/ui/widgets/playlist_album_scroll_behaviour.dart';
 import '../../../services/downloader.dart';
 import '../../navigator.dart';
@@ -18,6 +16,7 @@ import '../../widgets/snackbar.dart';
 import '../../widgets/song_list_tile.dart';
 import '../../widgets/songinfo_bottom_sheet.dart';
 import '../../widgets/sort_widget.dart';
+import '../../widgets/cover_gradient_background.dart';
 import '../Library/library_controller.dart';
 import 'playlist_screen_controller.dart';
 
@@ -53,60 +52,13 @@ class PlaylistScreen extends StatelessWidget {
         },
         child: Stack(
           children: [
-            Obx(
-              () => playlistController.isContentFetched.isTrue
-                  ? Positioned(
-                      top: landscape
-                          ? 0
-                          : -.25 * playlistController.scrollOffset.value,
-                      right: landscape ? 0 : null,
-                      child: Obx(() {
-                        final opacityValue = 1 -
-                            playlistController.scrollOffset.value /
-                                (size.width - 100);
-                        return Opacity(
-                          opacity: opacityValue < 0 ||
-                                  playlistController.isSearchingOn.isTrue && !landscape
-                              ? 0
-                              : opacityValue,
-                          child: DecoratedBox(
-                            position: DecorationPosition.foreground,
-                            decoration: BoxDecoration(
-                              boxShadow: [
-                                BoxShadow(
-                                  color: Theme.of(context).canvasColor,
-                                  spreadRadius: 200,
-                                  blurRadius: 100,
-                                  offset: Offset(-size.height, 0),
-                                ),
-                                BoxShadow(
-                                  color: Theme.of(context).canvasColor,
-                                  spreadRadius: 200,
-                                  blurRadius: 100,
-                                  offset: Offset(
-                                      0,
-                                      landscape
-                                          ? size.height
-                                          : size.width + 80),
-                                )
-                              ],
-                            ),
-                            child: CachedNetworkImage(
-                              imageUrl: Thumbnail(playlistController
-                                      .playlist.value.thumbnailUrl)
-                                  .extraHigh,
-                              fit: landscape ? BoxFit.fitHeight : BoxFit.cover,
-                              width: landscape ? null : size.width,
-                              height: landscape ? size.height : size.width,
-                            ),
-                          ),
-                        );
-                      }))
-                  : SizedBox(
-                      height: size.width,
-                      width: size.width,
-                    ),
-            ),
+            Obx(() => Positioned(
+                  top: -playlistController.scrollOffset.value,
+                  left: 0,
+                  right: 0,
+                  child: CoverGradientBackground(
+                      imageUrl: playlistController.playlist.value.thumbnailUrl),
+                )),
             Column(
               children: [
                 Container(
@@ -237,12 +189,8 @@ class PlaylistScreen extends StatelessWidget {
                           behavior: PlaylistAlbumScrollBehaviour(),
                           child: ListView.builder(
                             addRepaintBoundaries: false,
-                            padding: EdgeInsets.only(
-                              top: playlistController.isSearchingOn.isTrue
-                                  ? 0
-                                  : landscape
-                                      ? 150
-                                      : 200,
+                            padding: const EdgeInsets.only(
+                              top: 0,
                               bottom: 200,
                             ),
                             itemCount: playlistController.songList.isEmpty ||
@@ -251,7 +199,12 @@ class PlaylistScreen extends StatelessWidget {
                                 : playlistController.songList.length + 3,
                             itemBuilder: (_, index) {
                               if (index == 0) {
-                                return Padding(
+                                return Column(children: [
+                                  if (playlistController.isSearchingOn.isFalse)
+                                    CoverArtHeader(
+                                        imageUrl: playlistController
+                                            .playlist.value.thumbnailUrl),
+                                  Padding(
                                   padding: const EdgeInsets.only(left: 15.0),
                                   child: SizedBox(
                                     height: 40,
@@ -310,7 +263,8 @@ class PlaylistScreen extends StatelessWidget {
                                           IconButton(
                                             tooltip: "play".tr,
                                               onPressed: () {
-                                                playerController.playPlayListSong(
+                                                playlistController.markPlayed();
+                                playerController.playPlayListSong(
                                                     List<MediaItem>.from(
                                                         playlistController
                                                             .songList),
@@ -366,7 +320,8 @@ class PlaylistScreen extends StatelessWidget {
                                                             .songList);
                                                 songsToplay.shuffle();
                                                 songsToplay.shuffle();
-                                                playerController.playPlayListSong(
+                                                playlistController.markPlayed();
+                                playerController.playPlayListSong(
                                                     songsToplay, 0,
                                                     playfrom: PlaylingFrom(
                                                         name: playlistController
@@ -546,7 +501,8 @@ class PlaylistScreen extends StatelessWidget {
                                       ),
                                     ),
                                   ),
-                                );
+                                  ),
+                                ]);
                               } else if (index == 1) {
                                 final title =
                                     playlistController.playlist.value.title;
@@ -693,7 +649,8 @@ class PlaylistScreen extends StatelessWidget {
                                     const EdgeInsets.only(left: 20.0, right: 5),
                                 child: SongListTile(
                                   onTap: () {
-                                    playerController.playPlayListSong(
+                                    playlistController.markPlayed();
+                                playerController.playPlayListSong(
                                         List<MediaItem>.from(
                                             playlistController.songList),
                                         index - 3,
@@ -703,6 +660,8 @@ class PlaylistScreen extends StatelessWidget {
                                             type: PlaylingFromType.PLAYLIST));
                                   },
                                   song: playlistController.songList[index - 3],
+                                  compact: true,
+                                  showThumb: true,
                                   isPlaylistOrAlbum: true,
                                   playlist: playlistController.playlist.value,
                                 ),
