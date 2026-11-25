@@ -1,4 +1,558 @@
+diff --git a/lib/services/spotify_service.dart b/lib/services/spotify_service.dart
+index 2aee6b4..6659a14 100644
+--- a/lib/services/spotify_service.dart
++++ b/lib/services/spotify_service.dart
+@@ -3,6 +3,7 @@ import 'dart:convert';
+ import 'dart:math';
+ 
+ import 'package:audio_service/audio_service.dart';
++import 'package:flutter/material.dart' show ScaffoldMessenger;
+ import 'package:crypto/crypto.dart';
+ import 'package:dio/dio.dart';
+ import 'package:flutter_inappwebview/flutter_inappwebview.dart' show CookieManager;
+@@ -14,6 +15,7 @@ import '../models/artist.dart';
+ import '../models/media_Item_builder.dart';
+ import '../models/playlist.dart';
+ import '../ui/screens/Library/library_controller.dart';
++import '../ui/widgets/snackbar.dart';
+ import '../utils/helper.dart';
+ import 'music_service.dart';
+ 
+@@ -53,6 +55,20 @@ class _Lock {
+   }
+ }
+ 
++class _SpPlaylist {
++  _SpPlaylist(this.id, this.name, this.cover);
++  final String id;
++  final String name;
++  final String? cover;
++}
++
++class _SpItem {
++  _SpItem(this.key, this.name, this.artist);
++  final String key;
++  final String name;
++  final String artist;
++}
++
+ class SpotifyException implements Exception {
+   SpotifyException(this.code, this.message);
+   final int code;
+@@ -103,7 +119,7 @@ class SpotifyService extends GetxService {
+   Future<String>? _tokenInFlight;
+ 
+   // Shared limits so parallel playlists don't flood Spotify / YouTube Music.
+-  final _matchPool = _Pool(12);
++  final _matchPool = _Pool(20);
+   final _gqlPool = _Pool(6);
+   final _dbLock = _Lock();
+ 
+@@ -394,8 +410,44 @@ class SpotifyService extends GetxService {
+       );
+ 
+   // --------------------------------------------------------------- import --
++  /// Text of the last finished sync (shown in a snackbar).
++  String lastSummary = 'Spotify sync done';
++
++  /// Runs [importLibrary] without blocking the UI. New playlists, albums and
++  /// artists appear in the library live while this runs.
++  Future<void> importInBackground() async {
++    final err = await importLibrary();
++    final ctx = Get.context;
++    if (ctx != null && ctx.mounted) {
++      ScaffoldMessenger.maybeOf(ctx)?.showSnackBar(
++          snackbar(ctx, err ?? lastSummary, size: SanckBarSize.BIG));
++    }
++  }
++
++  String? _coverOf(Map data) {
++    try {
++      final images = data['images'];
++      final items = images is Map ? images['items'] : null;
++      final first = items is List && items.isNotEmpty ? items.first : null;
++      final sources = first is Map ? first['sources'] : null;
++      final source = sources is List && sources.isNotEmpty ? sources.first : null;
++      final url = source is Map ? source['url'] : null;
++      if (url is String) return url;
++    } catch (_) {}
++    return null;
++  }
++
++  Future<int> _likedTotal() async {
++    final r = await _gql('fetchLibraryTracks', {'offset': 0, 'limit': 1});
++    return (r['data']?['me']?['library']?['tracks']?['totalCount'] ?? -1)
++        as int;
++  }
++
++  /// Adds only what is missing: playlists (or half-imported ones), liked
++  /// songs when the count changed, and albums / artists that are not in the
++  /// library yet. Everything shows up in the UI as soon as it is added.
+   Future<String?> importLibrary() async {
+-    if (isImporting.value) return null;
++    if (isImporting.value) return 'A Spotify sync is already running';
+     isImporting.value = true;
+     progress.value = 0;
+     try {
+@@ -403,7 +455,10 @@ class SpotifyService extends GetxService {
+       await _refreshHashes();
+       final libs = await Future.wait([
+         _library('Playlists'),
+-        _library('Artists'),
++        _library('Artists').catchError((e) {
++          printERROR('Spotify artists fetch failed: $e');
++          return <Map>[];
++        }),
+         _library('Albums').catchError((e) {
+           printERROR('Spotify albums fetch failed: $e');
+           return <Map>[];
+@@ -420,80 +475,190 @@ class SpotifyService extends GetxService {
+           .where((w) => '${w['__typename']}'.contains('Album') && w['data'] is Map)
+           .toList();
+ 
+-      final jobs = <Future<void> Function()>[];
+-      final totalSteps = playlists.length + 1 + albums.length + artists.length;
++      final meta = await Hive.openBox('SpotifyMeta');
++
++      // what the library already has
++      final have = await _dbLock.synchronized(() async {
++        final pl = await Hive.openBox('LibraryPlaylists');
++        final al = await Hive.openBox('LibraryAlbums');
++        final ar = await Hive.openBox('LibraryArtists');
++        final r = (
++          pl.keys.map((k) => '$k').toSet(),
++          al.keys.map((k) => '$k').toSet(),
++          ar.keys.map((k) => '$k').toSet()
++        );
++        await pl.close();
++        await al.close();
++        await ar.close();
++        return r;
++      });
++
++      // ---- work out what is missing
++      final wantedPlaylists = <_SpPlaylist>[];
++      for (final w in playlists) {
++        final data = w['data'] as Map;
++        final id = '${w['_uri'] ?? ''}'.split(':').last;
++        if (id.isEmpty) continue;
++        final key = 'LIBSP_$id';
++        if (have.$1.contains(key) && meta.get('done:$key') == true) continue;
++        wantedPlaylists
++            .add(_SpPlaylist(id, '${data['name'] ?? 'Playlist'}', _coverOf(data)));
++      }
++
++      final likedTotal = await _likedTotal().catchError((_) => -1);
++      final likedMissing = !have.$1.contains('LIBSP_liked') ||
++          meta.get('done:LIBSP_liked') != true ||
++          (likedTotal >= 0 && meta.get('likedCount') != likedTotal);
++
++      final wantedAlbums = <_SpItem>[];
++      for (final w in albums) {
++        final d = w['data'] as Map;
++        final name = '${d['name'] ?? ''}';
++        if (name.isEmpty) continue;
++        final artist = ((d['artists']?['items'] as List?) ?? []).isNotEmpty
++            ? '${d['artists']['items'][0]['profile']?['name'] ?? ''}'
++            : '';
++        final uri = '${w['_uri'] ?? ''}';
++        final key = 'album:${uri.isNotEmpty ? uri : '$name|$artist'}';
++        final mapped = meta.get(key);
++        if (mapped != null && have.$2.contains('$mapped')) continue;
++        wantedAlbums.add(_SpItem(key, name, artist));
++      }
++
++      final wantedArtists = <_SpItem>[];
++      for (final w in artists) {
++        final d = w['data'] as Map;
++        final name = '${d['profile']?['name'] ?? d['name'] ?? ''}';
++        if (name.isEmpty) continue;
++        final uri = '${w['_uri'] ?? ''}';
++        final key = 'artist:${uri.isNotEmpty ? uri : name}';
++        final mapped = meta.get(key);
++        if (mapped != null && have.$3.contains('$mapped')) continue;
++        wantedArtists.add(_SpItem(key, name, ''));
++      }
++
++      final totalSteps = wantedPlaylists.length +
++          (likedMissing ? 1 : 0) +
++          wantedAlbums.length +
++          wantedArtists.length;
++      if (totalSteps == 0) {
++        lastSummary = 'Spotify is already up to date';
++        status.value = 'Done';
++        return null;
++      }
++
++      // ---- show the new playlists right away (they fill up in the background)
++      final shells = <Playlist>[
++        if (likedMissing)
++          Playlist(
++              title: 'Spotify Liked Songs',
++              playlistId: 'LIBSP_liked',
++              description: 'Spotify',
++              thumbnailUrl: Playlist.thumbPlaceholderUrl,
++              isCloudPlaylist: false),
++        for (final p in wantedPlaylists)
++          Playlist(
++              title: p.name,
++              playlistId: 'LIBSP_${p.id}',
++              description: 'Spotify',
++              thumbnailUrl: (p.cover != null && p.cover!.isNotEmpty)
++                  ? p.cover!
++                  : Playlist.thumbPlaceholderUrl,
++              isCloudPlaylist: false),
++      ];
++      if (shells.isNotEmpty) {
++        await _dbLock.synchronized(() async {
++          final b = await Hive.openBox('LibraryPlaylists');
++          for (final sh in shells) {
++            if (!b.containsKey(sh.playlistId)) {
++              await b.put(sh.playlistId, sh.toJson());
++            }
++          }
++          await b.close();
++        });
++        for (final sh in shells) {
++          _pushPlaylist(sh);
++        }
++      }
++
+       var done = 0;
++      var addedPlaylists = 0, addedAlbums = 0, addedArtists = 0;
+       void tick(String s) {
+         done++;
+         progress.value = done / max(totalSteps, 1);
+         status.value = s;
+       }
+ 
+-      jobs.add(() async {
+-        final liked = await _likedTracks();
+-        await _importTrackList('LIBSP_liked', 'Spotify Liked Songs', liked, null);
+-        tick('Liked Songs');
+-      });
+-
+-      for (final w in playlists) {
+-        jobs.add(() async {
+-          final data = w['data'] as Map;
+-          final uri = '${w['_uri'] ?? ''}';
+-          final id = uri.split(':').last;
+-          final name = '${data['name'] ?? 'Playlist'}';
+-          if (id.isEmpty) return tick(name);
+-          String? cover;
+-          try {
+-            final images = data['images'];
+-            final items = images is Map ? images['items'] : null;
+-            final first = items is List && items.isNotEmpty ? items.first : null;
+-            final sources = first is Map ? first['sources'] : null;
+-            final source = sources is List && sources.isNotEmpty ? sources.first : null;
+-            final url = source is Map ? source['url'] : null;
+-            if (url is String) cover = url;
+-          } catch (_) {}
+-          final tracks = await _playlistTracks(id);
+-          await _importTrackList('LIBSP_$id', name, tracks, cover);
+-          tick(name);
++      final heavy = <Future<void> Function()>[];
++      final light = <Future<void> Function()>[];
++
++      if (likedMissing) {
++        heavy.add(() async {
++          final liked = await _likedTracks();
++          final ok = await _importTrackList(
++              'LIBSP_liked', 'Spotify Liked Songs', liked, null);
++          if (ok) {
++            if (likedTotal >= 0) await meta.put('likedCount', likedTotal);
++            addedPlaylists++;
++          }
++          tick('Liked Songs');
+         });
+       }
+ 
+-      for (final w in albums) {
+-        jobs.add(() async {
+-          final d = w['data'] as Map;
+-          final name = '${d['name'] ?? ''}';
+-          final artist = ((d['artists']?['items'] as List?) ?? []).isNotEmpty
+-              ? '${d['artists']['items'][0]['profile']?['name'] ?? ''}'
+-              : '';
+-          if (name.isNotEmpty) await _importAlbum(name, artist);
+-          tick(name);
++      for (final p in wantedPlaylists) {
++        heavy.add(() async {
++          final tracks = await _playlistTracks(p.id);
++          final ok =
++              await _importTrackList('LIBSP_${p.id}', p.name, tracks, p.cover);
++          if (ok) addedPlaylists++;
++          tick(p.name);
+         });
+       }
+ 
+-      for (final w in artists) {
+-        jobs.add(() async {
+-          final d = w['data'] as Map;
+-          final name = '${d['profile']?['name'] ?? d['name'] ?? ''}';
+-          if (name.isNotEmpty) await _importArtist(name);
+-          tick(name);
++      for (final a in wantedAlbums) {
++        light.add(() async {
++          final album = await _importAlbum(a.name, a.artist);
++          if (album != null) {
++            await meta.put(a.key, album.browseId);
++            _pushAlbum(album);
++            addedAlbums++;
++          }
++          tick(a.name);
+         });
+       }
+ 
+-      final queue = List.of(jobs);
+-      await Future.wait(List.generate(8, (_) async {
+-        while (queue.isNotEmpty) {
+-          final job = queue.removeAt(0);
+-          try {
+-            await job();
+-          } catch (e) {
+-            printERROR('Spotify import step failed: $e');
+-            done++;
++      for (final a in wantedArtists) {
++        light.add(() async {
++          final artist = await _importArtist(a.name);
++          if (artist != null) {
++            await meta.put(a.key, artist.browseId);
++            _pushArtist(artist);
++            addedArtists++;
+           }
+-        }
+-      }));
++          tick(a.name);
++        });
++      }
++
++      Future<void> run(List<Future<void> Function()> queue, int workers) =>
++          Future.wait(List.generate(workers, (_) async {
++            while (queue.isNotEmpty) {
++              final job = queue.removeAt(0);
++              try {
++                await job();
++              } catch (e) {
++                printERROR('Spotify import step failed: $e');
++                done++;
++              }
++            }
++          }));
++
++      // albums / artists are cheap, so they run next to the playlists
++      await Future.wait([run(heavy, 8), run(light, 4)]);
+ 
+       _refreshControllers();
+       status.value = 'Done';
++      lastSummary = 'Spotify synced: +$addedPlaylists playlists, '
++          '+$addedAlbums albums, +$addedArtists artists';
+       return null;
+     } on SpotifyException catch (e) {
+       return e.message;
+@@ -504,27 +669,41 @@ class SpotifyService extends GetxService {
+     }
+   }
+ 
+-  Future<void> _importTrackList(
+-      String playlistId, String title, List<Map> tracks, String? cover) async {
+-    final matchBox = await Hive.openBox('SpotifyMatches');
+-    final wanted = tracks
+-        .where((t) => t['id'] != '' && t['local'] != true)
+-        .toList(growable: false);
++  // ---- live updates: push straight into the open library lists
++  void _pushPlaylist(Playlist p) {
++    if (!Get.isRegistered<LibraryPlaylistsController>()) return;
++    final l = Get.find<LibraryPlaylistsController>().libraryPlaylists;
++    final i = l.indexWhere((e) => e.playlistId == p.playlistId);
++    if (i >= 0) {
++      l[i] = p;
++    } else {
++      l.add(p);
++    }
++  }
+ 
+-    // Match all tracks in parallel (bounded by the shared pool). Cached
+-    // matches return instantly; order of the Spotify playlist is preserved.
+-    final results = await Future.wait(wanted.map((t) async {
+-      final cached = matchBox.get(t['id']);
+-      if (cached != null) return MediaItemBuilder.fromJson(cached);
+-      final item = await _matchPool.run(() => _matchTrack(t));
+-      if (item != null) {
+-        matchBox.put(t['id'], MediaItemBuilder.toJson(item));
+-      }
+-      return item;
+-    }));
+-    final matched = results.whereType<MediaItem>().toList();
+-    if (matched.isEmpty && tracks.isNotEmpty) return;
++  void _pushAlbum(Album a) {
++    if (!Get.isRegistered<LibraryAlbumsController>()) return;
++    final l = Get.find<LibraryAlbumsController>().libraryAlbums;
++    if (!l.any((e) => e.browseId == a.browseId)) l.add(a);
++  }
++
++  void _pushArtist(Artist a) {
++    if (!Get.isRegistered<LibraryArtistsController>()) return;
++    final l = Get.find<LibraryArtistsController>().libraryArtists;
++    if (!l.any((e) => e.browseId == a.browseId)) l.add(a);
++  }
+ 
++  /// Bumped every time a Spotify playlist is written, so an open playlist
++  /// screen can reload its songs while the import is still running.
++  final playlistRevision = 0.obs;
++  String? lastWrittenPlaylistId;
++
++  /// Writes the songs matched so far (in Spotify order) plus the playlist
++  /// entry, and pushes it to the library. Called while matching runs, so a
++  /// playlist fills up gradually instead of staying empty until the end.
++  Future<void> _writePlaylist(String playlistId, String title,
++      List<MediaItem> matched, String? cover) async {
++    Playlist? written;
+     // Hive boxes are opened/closed by name, so keep the writes one at a time.
+     await _dbLock.synchronized(() async {
+       final listBox = await Hive.openBox(playlistId);
+@@ -540,25 +719,87 @@ class SpotifyService extends GetxService {
+       final firstThumbnail =
+           thumbnails is List && thumbnails.isNotEmpty ? thumbnails.first : null;
+       final existingCover = firstThumbnail is Map &&
+-              firstThumbnail['url'] is String
++              firstThumbnail['url'] is String &&
++              firstThumbnail['url'] != Playlist.thumbPlaceholderUrl
+           ? firstThumbnail['url'] as String
+           : null;
+       final keptCover = cover ?? existingCover;
+-      await plBox.put(
+-          playlistId,
+-          Playlist(
+-                  title: title,
+-                  playlistId: playlistId,
+-                  description: 'Spotify',
+-                  thumbnailUrl: (keptCover != null && keptCover.isNotEmpty)
+-                      ? keptCover
+-                      : (matched.isNotEmpty
+-                          ? matched.first.artUri.toString()
+-                          : Playlist.thumbPlaceholderUrl),
+-                  isCloudPlaylist: false)
+-              .toJson());
++      written = Playlist(
++          title: title,
++          playlistId: playlistId,
++          description: 'Spotify',
++          thumbnailUrl: (keptCover != null && keptCover.isNotEmpty)
++              ? keptCover
++              : (matched.isNotEmpty
++                  ? matched.first.artUri.toString()
++                  : Playlist.thumbPlaceholderUrl),
++          isCloudPlaylist: false);
++      await plBox.put(playlistId, written!.toJson());
+       await plBox.close();
+     });
++    if (written != null) _pushPlaylist(written!);
++    lastWrittenPlaylistId = playlistId;
++    playlistRevision.value++;
++  }
++
++  /// Returns true when the playlist was written.
++  Future<bool> _importTrackList(
++      String playlistId, String title, List<Map> tracks, String? cover) async {
++    final matchBox = await Hive.openBox('SpotifyMatches');
++    final meta = await Hive.openBox('SpotifyMeta');
++    final wanted = tracks
++        .where((t) => t['id'] != '' && t['local'] != true)
++        .toList(growable: false);
++
++    // Match all tracks in parallel (bounded by the shared pool, earliest
++    // tracks first). Cached matches return instantly and the order of the
++    // Spotify playlist is preserved. The first songs are written after a
++    // handful of matches, then every few dozen, so the playlist is usable
++    // long before the last track is matched.
++    final slots = List<MediaItem?>.filled(wanted.length, null);
++    var finished = 0, flushing = false;
++    var nextFlush = 8;
++
++    Future<void> flushPartial() async {
++      if (flushing) return;
++      flushing = true;
++      try {
++        nextFlush = finished + 40;
++        await _writePlaylist(
++            playlistId, title, slots.whereType<MediaItem>().toList(), cover);
++      } finally {
++        flushing = false;
++      }
++    }
++
++    await Future.wait(List.generate(wanted.length, (i) async {
++      final t = wanted[i];
++      MediaItem? item;
++      final cached = matchBox.get(t['id']);
++      if (cached != null) {
++        item = MediaItemBuilder.fromJson(cached);
++      } else {
++        item = await _matchPool.run(() => _matchTrack(t));
++        if (item != null) {
++          matchBox.put(t['id'], MediaItemBuilder.toJson(item));
++        }
++      }
++      slots[i] = item;
++      finished++;
++      if (finished >= nextFlush && finished < wanted.length) {
++        await flushPartial();
++      }
++    }));
++
++    final matched = slots.whereType<MediaItem>().toList();
++    if (matched.isEmpty && tracks.isNotEmpty) return false;
++    // wait for a running partial write, then write the complete list
++    while (flushing) {
++      await Future.delayed(const Duration(milliseconds: 20));
++    }
++    await _writePlaylist(playlistId, title, matched, cover);
++    await meta.put('done:$playlistId', true);
++    return true;
+   }
+ 
+   Future<MediaItem?> _matchTrack(Map t) async {
+@@ -582,23 +823,24 @@ class SpotifyService extends GetxService {
+     }
+   }
+ 
+-  Future<void> _importAlbum(String name, String artist) async {
++  Future<Album?> _importAlbum(String name, String artist) async {
+     final res = await _matchPool.run(() => Get.find<MusicServices>()
+         .search('$name $artist', filter: 'albums', limit: 3));
+     final album = _firstList(res).whereType<Album>().firstOrNull;
+-    if (album == null) return;
++    if (album == null) return null;
+     await _dbLock.synchronized(() async {
+       final box = await Hive.openBox('LibraryAlbums');
+       await box.put(album.browseId, album.toJson());
+       await box.close();
+     });
++    return album;
+   }
+ 
+-  Future<void> _importArtist(String name) async {
++  Future<Artist?> _importArtist(String name) async {
+     final res = await _matchPool.run(() =>
+         Get.find<MusicServices>().search(name, filter: 'artists', limit: 3));
+     final list = _firstList(res).whereType<Artist>().toList();
+-    if (list.isEmpty) return;
++    if (list.isEmpty) return null;
+     final exact = list.firstWhere(
+         (a) => a.name.toLowerCase() == name.toLowerCase(),
+         orElse: () => list.first);
+@@ -607,6 +849,7 @@ class SpotifyService extends GetxService {
+       await box.put(exact.browseId, exact.toJson());
+       await box.close();
+     });
++    return exact;
+   }
+ 
+   List _firstList(Map<String, dynamic> res) {
 diff --git a/lib/ui/home.dart b/lib/ui/home.dart
+index 9ade003..f6ef1ba 100644
 --- a/lib/ui/home.dart
 +++ b/lib/ui/home.dart
 @@ -12,6 +12,8 @@ import '../ui/player/player.dart';
@@ -66,6 +620,7 @@ diff --git a/lib/ui/home.dart b/lib/ui/home.dart
        ),
      );
 diff --git a/lib/ui/navigator.dart b/lib/ui/navigator.dart
+index 921d2b6..6f9d966 100644
 --- a/lib/ui/navigator.dart
 +++ b/lib/ui/navigator.dart
 @@ -11,6 +11,32 @@ import 'screens/Playlist/playlist_screen.dart';
@@ -108,7 +663,7 @@ diff --git a/lib/ui/navigator.dart b/lib/ui/navigator.dart
 -                  page: () => const HomeScreen(), settings: settings);
 +                  page: () => const HomeScreen(), settings: settings,
 +                  customTransition: FadeThroughBlackTransition(),
-+                  transitionDuration: const Duration(milliseconds: 350));
++                  transitionDuration: const Duration(milliseconds: 180));
              
              case ScreenNavigationSetup.albumScreen:
                final id = (settings.arguments as (Album?, String)).$2;
@@ -119,7 +674,7 @@ diff --git a/lib/ui/navigator.dart b/lib/ui/navigator.dart
 -                  settings: settings);
 +                  settings: settings,
 +                  customTransition: FadeThroughBlackTransition(),
-+                  transitionDuration: const Duration(milliseconds: 350));
++                  transitionDuration: const Duration(milliseconds: 180));
              
              case ScreenNavigationSetup.playlistScreen:
               final id = (settings.arguments as List)[1] as String;
@@ -130,21 +685,21 @@ diff --git a/lib/ui/navigator.dart b/lib/ui/navigator.dart
 -                  settings: settings);
 +                  settings: settings,
 +                  customTransition: FadeThroughBlackTransition(),
-+                  transitionDuration: const Duration(milliseconds: 350));
++                  transitionDuration: const Duration(milliseconds: 180));
              
              case ScreenNavigationSetup.searchScreen:
                return GetPageRoute(
 -                  page: () => const SearchScreen(), settings: settings);
 +                  page: () => const SearchScreen(), settings: settings,
 +                  customTransition: FadeThroughBlackTransition(),
-+                  transitionDuration: const Duration(milliseconds: 350));
++                  transitionDuration: const Duration(milliseconds: 180));
              
              case ScreenNavigationSetup.searchResultScreen:
                return GetPageRoute(
 -                  page: () => const SearchResultScreen(), settings: settings);
 +                  page: () => const SearchResultScreen(), settings: settings,
 +                  customTransition: FadeThroughBlackTransition(),
-+                  transitionDuration: const Duration(milliseconds: 350));
++                  transitionDuration: const Duration(milliseconds: 180));
              
              case ScreenNavigationSetup.artistScreen:
                final args = settings.arguments as List;
@@ -155,11 +710,12 @@ diff --git a/lib/ui/navigator.dart b/lib/ui/navigator.dart
 -                  settings: settings);
 +                  settings: settings,
 +                  customTransition: FadeThroughBlackTransition(),
-+                  transitionDuration: const Duration(milliseconds: 350));
++                  transitionDuration: const Duration(milliseconds: 180));
              
              default:
                return null;
 diff --git a/lib/ui/player/components/mini_player.dart b/lib/ui/player/components/mini_player.dart
+index 71a8694..ffad750 100644
 --- a/lib/ui/player/components/mini_player.dart
 +++ b/lib/ui/player/components/mini_player.dart
 @@ -122,7 +122,7 @@ class MiniPlayer extends StatelessWidget {
@@ -171,7 +727,30 @@ diff --git a/lib/ui/player/components/mini_player.dart b/lib/ui/player/component
                              },
                              child: ColoredBox(
                                color: Colors.transparent,
+diff --git a/lib/ui/player/components/spotify_mini_player.dart b/lib/ui/player/components/spotify_mini_player.dart
+index dea75c0..bbb2e2a 100644
+--- a/lib/ui/player/components/spotify_mini_player.dart
++++ b/lib/ui/player/components/spotify_mini_player.dart
+@@ -64,7 +64,7 @@ class SpotifyMiniPlayer extends StatelessWidget {
+                                     playerController.prev();
+                                   }
+                                 },
+-                                onTap: playerController.playerPanelController.open,
++                                onTap: playerController.openPlayerFade,
+                                 child: Column(
+                                   mainAxisAlignment: MainAxisAlignment.center,
+                                   crossAxisAlignment: CrossAxisAlignment.start,
+@@ -86,8 +86,6 @@ class SpotifyMiniPlayer extends StatelessWidget {
+                                 ),
+                               ),
+                             ),
+-                            const Icon(Icons.speaker_group_outlined,
+-                                color: Colors.white, size: 24),
+                             Obx(() => SpSavedButton(
+                                 saved: playerController.isCurrentSongFav.isTrue,
+                                 size: 24,
 diff --git a/lib/ui/player/components/standard_player.dart b/lib/ui/player/components/standard_player.dart
+index 720848a..b58279f 100644
 --- a/lib/ui/player/components/standard_player.dart
 +++ b/lib/ui/player/components/standard_player.dart
 @@ -1,5 +1,6 @@
@@ -181,24 +760,24 @@ diff --git a/lib/ui/player/components/standard_player.dart b/lib/ui/player/compo
  
  import '../../widgets/songinfo_bottom_sheet.dart';
  import '../../widgets/spotify_style.dart';
-@@ -194,7 +195,7 @@ class _StandardPlayerState extends State<StandardPlayer> {
-                     Icons.keyboard_arrow_down,
-                     size: 28,
-                   ),
--                  onPressed: playerController.playerPanelController.close,
-+                  onPressed: () => playerController.closePlayerFade(),
-                 ),
- 
-                 /// Playing from [Album name]
-@@ -212,11 +213,18 @@ class _StandardPlayerState extends State<StandardPlayer> {
-                                   letterSpacing: 0.8,
-                                   fontWeight: FontWeight.w400)),
-                           Obx(
--                            () => Text(
--                              playerController.playinfrom.value.nameString,
--                              overflow: TextOverflow.ellipsis,
--                              style: const TextStyle(
--                                  fontSize: 15, fontWeight: FontWeight.w700),
+@@ -55,6 +56,38 @@ class _StandardPlayerState extends State<StandardPlayer> {
+     playerArtImageSize = playerArtImageSize > spaceAvailableForArtImage
+         ? spaceAvailableForArtImage
+         : playerArtImageSize;
++    // "Playing from ..." label: scrolls with the player in portrait
++    final playingFromText = Padding(
++                    padding: const EdgeInsets.only(top: 8.0, left: 5, right: 5),
++                    child: Obx(
++                      () => Column(
++                        children: [
++                          Text(
++                              "${playerController.playinfrom.value.typeString}"
++                                  .toUpperCase(),
++                              style: const TextStyle(
++                                  fontSize: 12,
++                                  letterSpacing: 0.8,
++                                  fontWeight: FontWeight.w400)),
++                          Obx(
 +                            () => Marquee(
 +                              delay: const Duration(milliseconds: 300),
 +                              duration: const Duration(seconds: 5),
@@ -211,10 +790,81 @@ diff --git a/lib/ui/player/components/standard_player.dart b/lib/ui/player/compo
 +                                style: const TextStyle(
 +                                    fontSize: 15, fontWeight: FontWeight.w700),
 +                              ),
-                             ),
-                           )
-                         ],
++                            ),
++                          )
++                        ],
++                      ),
++                    ),
++                  );
+     return Stack(
+       children: [
+         /// Stack first child
+@@ -124,7 +157,8 @@ class _StandardPlayerState extends State<StandardPlayer> {
+                     children: [
+                       SizedBox(
+                         height: size.height,
+-                        child: Padding(
++                        child: Stack(children: [
++                        Padding(
+                           padding: const EdgeInsets.symmetric(horizontal: 25),
+                           child: Column(
+                           children: [
+@@ -168,6 +202,13 @@ class _StandardPlayerState extends State<StandardPlayer> {
+                           ],
+                         ),
+                         ),
++                        Positioned(
++                          top: Get.mediaQuery.padding.top + 20,
++                          left: 63,
++                          right: 63,
++                          child: playingFromText,
++                        ),
++                        ]),
+                       ),
+                       const LyricsPreviewCard(),
+                       const ArtistPreviewCard(),
+@@ -194,35 +235,14 @@ class _StandardPlayerState extends State<StandardPlayer> {
+                     Icons.keyboard_arrow_down,
+                     size: 28,
+                   ),
+-                  onPressed: playerController.playerPanelController.close,
++                  onPressed: () => playerController.closePlayerFade(),
+                 ),
+ 
+                 /// Playing from [Album name]
+                 Expanded(
+-                  child: Padding(
+-                    padding: const EdgeInsets.only(top: 8.0, left: 5, right: 5),
+-                    child: Obx(
+-                      () => Column(
+-                        children: [
+-                          Text(
+-                              "${playerController.playinfrom.value.typeString}"
+-                                  .toUpperCase(),
+-                              style: const TextStyle(
+-                                  fontSize: 12,
+-                                  letterSpacing: 0.8,
+-                                  fontWeight: FontWeight.w400)),
+-                          Obx(
+-                            () => Text(
+-                              playerController.playinfrom.value.nameString,
+-                              overflow: TextOverflow.ellipsis,
+-                              style: const TextStyle(
+-                                  fontSize: 15, fontWeight: FontWeight.w700),
+-                            ),
+-                          )
+-                        ],
+-                      ),
+-                    ),
+-                  ),
++                  child: context.isLandscape
++                      ? playingFromText
++                      : const SizedBox.shrink(),
+                 ),
+ 
+                 /// More button for current song context
 diff --git a/lib/ui/player/player_controller.dart b/lib/ui/player/player_controller.dart
+index b715f6d..838c842 100644
 --- a/lib/ui/player/player_controller.dart
 +++ b/lib/ui/player/player_controller.dart
 @@ -29,6 +29,45 @@ class PlayerController extends GetxController
@@ -230,14 +880,14 @@ diff --git a/lib/ui/player/player_controller.dart b/lib/ui/player/player_control
 +  Future<void> _fadeThroughBlack(Future<void> Function() change) async {
 +    if (_fadingPlayer) return;
 +    _fadingPlayer = true;
-+    fadeOverlayDuration.value = const Duration(milliseconds: 160);
++    fadeOverlayDuration.value = const Duration(milliseconds: 70);
 +    fadeOverlay.value = 1.0;
-+    await Future.delayed(const Duration(milliseconds: 170));
++    await Future.delayed(const Duration(milliseconds: 75));
 +    await change();
-+    await Future.delayed(const Duration(milliseconds: 40));
-+    fadeOverlayDuration.value = const Duration(milliseconds: 220);
++    await Future.delayed(const Duration(milliseconds: 10));
++    fadeOverlayDuration.value = const Duration(milliseconds: 100);
 +    fadeOverlay.value = 0.0;
-+    await Future.delayed(const Duration(milliseconds: 230));
++    await Future.delayed(const Duration(milliseconds: 100));
 +    _fadingPlayer = false;
 +  }
 +
@@ -278,6 +928,7 @@ diff --git a/lib/ui/player/player_controller.dart b/lib/ui/player/player_control
      if (initFlagForPlayer) {
 diff --git a/lib/ui/screens/Album/album_header.dart b/lib/ui/screens/Album/album_header.dart
 new file mode 100644
+index 0000000..3660221
 --- /dev/null
 +++ b/lib/ui/screens/Album/album_header.dart
 @@ -0,0 +1,231 @@
@@ -513,6 +1164,7 @@ new file mode 100644
 +  }
 +}
 diff --git a/lib/ui/screens/Album/album_screen.dart b/lib/ui/screens/Album/album_screen.dart
+index e1fd1a4..f301e3c 100644
 --- a/lib/ui/screens/Album/album_screen.dart
 +++ b/lib/ui/screens/Album/album_screen.dart
 @@ -15,6 +15,8 @@ import '../../widgets/snackbar.dart';
@@ -841,6 +1493,7 @@ diff --git a/lib/ui/screens/Album/album_screen.dart b/lib/ui/screens/Album/album
                              },
                            ),
 diff --git a/lib/ui/screens/Album/album_screen_controller.dart b/lib/ui/screens/Album/album_screen_controller.dart
+index 6a98ac5..687c44c 100644
 --- a/lib/ui/screens/Album/album_screen_controller.dart
 +++ b/lib/ui/screens/Album/album_screen_controller.dart
 @@ -58,30 +58,35 @@ class AlbumScreenController extends PlaylistAlbumScreenControllerBase
@@ -892,6 +1545,7 @@ diff --git a/lib/ui/screens/Album/album_screen_controller.dart b/lib/ui/screens/
    }
  
 diff --git a/lib/ui/screens/Home/home_screen_controller.dart b/lib/ui/screens/Home/home_screen_controller.dart
+index 225919c..4109e35 100644
 --- a/lib/ui/screens/Home/home_screen_controller.dart
 +++ b/lib/ui/screens/Home/home_screen_controller.dart
 @@ -1,5 +1,7 @@
@@ -922,7 +1576,119 @@ diff --git a/lib/ui/screens/Home/home_screen_controller.dart b/lib/ui/screens/Ho
      reverseAnimationtransiton = index > tabIndex.value;
      tabIndex.value = index;
    }
+diff --git a/lib/ui/screens/Library/library_combined.dart b/lib/ui/screens/Library/library_combined.dart
+index c604f78..c500cd6 100644
+--- a/lib/ui/screens/Library/library_combined.dart
++++ b/lib/ui/screens/Library/library_combined.dart
+@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
+ import 'package:get/get.dart';
+ 
+ import '../../widgets/create_playlist_dialog.dart';
++import '../../widgets/library_search_overlay.dart';
+ import 'library.dart';
+ import '../../widgets/spotify_style.dart';
+ 
+@@ -27,7 +28,9 @@ class CombinedLibrary extends StatelessWidget {
+           crossAxisAlignment: CrossAxisAlignment.start,
+           children: [
+             // Header: avatar, title, search, create
+-            Padding(
++            Obx(() => tabCon.searching.value
++                ? const SizedBox.shrink()
++                : Padding(
+               padding: const EdgeInsets.fromLTRB(16, 12, 8, 4),
+               child: Row(children: [
+                 const SpAvatar(size: 36),
+@@ -38,7 +41,7 @@ class CombinedLibrary extends StatelessWidget {
+                 const Spacer(),
+                 IconButton(
+                     icon: const Icon(Icons.search, size: 30),
+-                    onPressed: tabCon.toggleSearch),
++                    onPressed: () => tabCon.openSearch(context)),
+                 IconButton(
+                     icon: const Icon(Icons.add, size: 32),
+                     onPressed: () => showDialog(
+@@ -46,26 +49,9 @@ class CombinedLibrary extends StatelessWidget {
+                         builder: (context) =>
+                             const CreateNRenamePlaylistPopup())),
+               ]),
+-            ),
+-            // Inline "find in library" field (toggled by the search icon)
+-            Obx(() => tabCon.searching.value
+-                ? Padding(
+-                    padding: const EdgeInsets.fromLTRB(16, 4, 16, 4),
+-                    child: TextField(
+-                      autofocus: true,
+-                      onChanged: (v) => tabCon.query.value = v.toLowerCase(),
+-                      decoration: InputDecoration(
+-                          isDense: true,
+-                          filled: true,
+-                          fillColor: spSurface,
+-                          hintText: 'Search in Your Library',
+-                          prefixIcon: const Icon(Icons.search, size: 22),
+-                          border: OutlineInputBorder(
+-                              borderRadius: BorderRadius.circular(6),
+-                              borderSide: BorderSide.none)),
+-                    ),
+-                  )
+-                : const SizedBox.shrink()),
++            )),
++            // room for the full-screen search bar while it is open
++            Obx(() => SizedBox(height: tabCon.searching.value ? 64 : 0)),
+             // Filter chips
+             SingleChildScrollView(
+               scrollDirection: Axis.horizontal,
+@@ -141,7 +127,7 @@ class CombinedLibrary extends StatelessWidget {
+                             crossAxisAlignment: CrossAxisAlignment.start,
+                             children: [
+                               LayoutBuilder(
+-                                  builder: (c, box) => e.thumb(box.maxWidth)),
++                                  builder: (c, box) => e.thumb(box.maxWidth, square: true)),
+                               const SizedBox(height: 6),
+                               Text(e.title,
+                                   maxLines: 1,
+@@ -170,7 +156,7 @@ class CombinedLibrary extends StatelessWidget {
+                         padding: const EdgeInsets.symmetric(
+                             horizontal: 16, vertical: 8),
+                         child: Row(children: [
+-                          e.thumb(64),
++                          e.thumb(64, square: true),
+                           const SizedBox(width: 14),
+                           Expanded(
+                             child: Column(
+@@ -210,9 +196,27 @@ class CombinedLibraryController extends GetxController {
+   final isGrid = false.obs;
+   final searching = false.obs;
+   final query = ''.obs;
++  final textController = TextEditingController();
+ 
+-  void toggleSearch() {
+-    searching.toggle();
+-    if (!searching.value) query.value = '';
++  /// Opens the full-screen "Search Your Library" page
++  /// (back arrow + grey field, "Find your favorites" while empty).
++  void openSearch(BuildContext context) {
++    if (LibrarySearchOverlay.isOpen) return;
++    searching.value = true;
++    LibrarySearchOverlay.open(
++      context,
++      textController: textController,
++      onChanged: (v) => query.value = v.trim().toLowerCase(),
++      onClose: () {
++        searching.value = false;
++        query.value = '';
++      },
++    );
++  }
++
++  @override
++  void onClose() {
++    textController.dispose();
++    super.onClose();
+   }
+ }
 diff --git a/lib/ui/screens/Library/library_controller.dart b/lib/ui/screens/Library/library_controller.dart
+index 9a387c2..feac912 100644
 --- a/lib/ui/screens/Library/library_controller.dart
 +++ b/lib/ui/screens/Library/library_controller.dart
 @@ -1,5 +1,6 @@
@@ -1229,17 +1995,21 @@ diff --git a/lib/ui/screens/Library/library_controller.dart b/lib/ui/screens/Lib
    late RxList<Album> libraryAlbums = RxList();
    final isContentFetched = false.obs;
 diff --git a/lib/ui/screens/Playlist/playlist_screen.dart b/lib/ui/screens/Playlist/playlist_screen.dart
+index ddb7353..2202c89 100644
 --- a/lib/ui/screens/Playlist/playlist_screen.dart
 +++ b/lib/ui/screens/Playlist/playlist_screen.dart
-@@ -18,6 +18,7 @@ import '../../widgets/snackbar.dart';
+@@ -18,6 +18,10 @@ import '../../widgets/snackbar.dart';
  import '../../widgets/song_list_tile.dart';
  import '../../widgets/songinfo_bottom_sheet.dart';
  import '../../widgets/sort_widget.dart';
 +import '../../widgets/cover_gradient_background.dart';
++import '../../widgets/spotify_playlist_widgets.dart';
++import '../../widgets/spotify_style.dart';
++import '../Home/home_screen_controller.dart';
  import '../Library/library_controller.dart';
  import 'playlist_screen_controller.dart';
  
-@@ -53,60 +54,13 @@ class PlaylistScreen extends StatelessWidget {
+@@ -53,60 +57,14 @@ class PlaylistScreen extends StatelessWidget {
          },
          child: Stack(
            children: [
@@ -1297,6 +2067,7 @@ diff --git a/lib/ui/screens/Playlist/playlist_screen.dart b/lib/ui/screens/Playl
 -                      width: size.width,
 -                    ),
 -            ),
++            // cover-tinted gradient that scrolls away with the list
 +            Obx(() => Positioned(
 +                  top: -playlistController.scrollOffset.value,
 +                  left: 0,
@@ -1307,7 +2078,66 @@ diff --git a/lib/ui/screens/Playlist/playlist_screen.dart b/lib/ui/screens/Playl
              Column(
                children: [
                  Container(
-@@ -238,11 +192,7 @@ class PlaylistScreen extends StatelessWidget {
+@@ -128,20 +86,37 @@ class PlaylistScreen extends StatelessWidget {
+                               icon: const Icon(Icons.arrow_back_ios)),
+                         ),
+                         Expanded(
+-                          child: Obx(
+-                            () => Marquee(
+-                              delay: const Duration(milliseconds: 300),
+-                              duration: const Duration(seconds: 5),
+-                              id: "${playlistController.playlist.value.title.hashCode.toString()}_appbar",
+-                              child: Text(
++                          child: Obx(() {
++                            final title =
+                                 playlistController.appBarTitleVisible.isTrue
+                                     ? playlistController.playlist.value.title
+-                                    : "",
+-                                maxLines: 1,
+-                                style: Theme.of(context).textTheme.titleLarge,
+-                              ),
+-                            ),
+-                          ),
++                                    : "";
++                            final style = Theme.of(context)
++                                .textTheme
++                                .titleLarge!
++                                .copyWith(fontWeight: FontWeight.w700);
++                            // centred title; only long titles scroll
++                            return LayoutBuilder(builder: (context, c) {
++                              final tp = TextPainter(
++                                  text: TextSpan(text: title, style: style),
++                                  maxLines: 1,
++                                  textDirection: TextDirection.ltr)
++                                ..layout();
++                              if (tp.width <= c.maxWidth) {
++                                return Center(
++                                    child: Text(title,
++                                        maxLines: 1,
++                                        textAlign: TextAlign.center,
++                                        style: style));
++                              }
++                              return Marquee(
++                                delay: const Duration(milliseconds: 300),
++                                duration: const Duration(seconds: 5),
++                                id: "${title.hashCode.toString()}_appbar",
++                                child: Text(title, maxLines: 1, style: style),
++                              );
++                            });
++                          }),
+                         ),
+                         if (!playlistController
+                                 .playlist.value.isCloudPlaylist &&
+@@ -221,6 +196,8 @@ class PlaylistScreen extends StatelessWidget {
+                                 },
+                                 icon: const Icon(Icons.more_vert)),
+                           )
++                        else
++                          const SizedBox(width: 50),
+                       ],
+                     ),
+                   ),
+@@ -238,11 +215,7 @@ class PlaylistScreen extends StatelessWidget {
                            child: ListView.builder(
                              addRepaintBoundaries: false,
                              padding: EdgeInsets.only(
@@ -1320,73 +2150,628 @@ diff --git a/lib/ui/screens/Playlist/playlist_screen.dart b/lib/ui/screens/Playl
                                bottom: 200,
                              ),
                              itemCount: playlistController.songList.isEmpty ||
-@@ -251,7 +201,12 @@ class PlaylistScreen extends StatelessWidget {
+@@ -251,141 +224,73 @@ class PlaylistScreen extends StatelessWidget {
                                  : playlistController.songList.length + 3,
                              itemBuilder: (_, index) {
                                if (index == 0) {
 -                                return Padding(
-+                                return Column(children: [
-+                                  if (playlistController.isSearchingOn.isFalse)
-+                                    CoverArtHeader(
-+                                        imageUrl: playlistController
-+                                            .playlist.value.thumbnailUrl),
-+                                  Padding(
-                                   padding: const EdgeInsets.only(left: 15.0),
-                                   child: SizedBox(
-                                     height: 40,
-@@ -310,7 +265,8 @@ class PlaylistScreen extends StatelessWidget {
-                                           IconButton(
-                                             tooltip: "play".tr,
+-                                  padding: const EdgeInsets.only(left: 15.0),
+-                                  child: SizedBox(
+-                                    height: 40,
+-                                    child: SingleChildScrollView(
+-                                      scrollDirection: Axis.horizontal,
++                                final pl = playlistController.playlist.value;
++                                return Column(
++                                  crossAxisAlignment: CrossAxisAlignment.start,
++                                  children: [
++                                    SpFindOnPage(
++                                      onStart: () => playlistController
++                                          .onSearchStart(pl.playlistId),
++                                      onSearch: (v) => playlistController
++                                          .onSearch(v, pl.playlistId),
++                                      onClose: () => playlistController
++                                          .onSearchClose(pl.playlistId),
++                                    ),
++                                    SpPlaylistHeader(
++                                      title: pl.title,
++                                      description: pl.description,
++                                      thumbnailUrl: pl.thumbnailUrl,
++                                      owner: pl.isCloudPlaylist
++                                          ? 'YouTube Music'
++                                          : 'You',
++                                      songs: playlistController.songList
++                                          .toList(),
++                                    ),
++                                  ],
++                                );
++                              } else if (index == 1) {
++                                final pl = playlistController.playlist.value;
++                                final isLocal = !pl.isCloudPlaylist &&
++                                    playlistController.isDefaultPlaylist.isFalse;
++                                return Column(
++                                  crossAxisAlignment: CrossAxisAlignment.start,
++                                  children: [
++                                    // Action row: cover thumb, download, share, more ... shuffle, play
++                                    Padding(
++                                      padding: const EdgeInsets.fromLTRB(
++                                          16, 0, 16, 10),
+                                       child: Row(
+                                         children: [
+-                                          // Bookmark button
+-                                          Obx(() => (playlistController.playlist
+-                                                      .value.isPipedPlaylist ||
+-                                                  !playlistController.playlist
+-                                                      .value.isCloudPlaylist)
+-                                              ? const SizedBox.shrink()
+-                                              : IconButton(
+-                                                  tooltip: playlistController
+-                                                          .isAddedToLibrary
+-                                                          .isFalse
+-                                                      ? "addToLibrary".tr
+-                                                      : "removeFromLibrary".tr,
+-                                                  splashRadius: 10,
+-                                                  onPressed: () {
+-                                                    final add = playlistController
+-                                                        .isAddedToLibrary.isFalse;
+-                                                    playlistController
+-                                                        .addNremoveFromLibrary(
+-                                                            playlistController
+-                                                                .playlist.value,
+-                                                            add: add)
+-                                                        .then((value) {
+-                                                      if (!context.mounted) {
+-                                                        return;
+-                                                      }
+-                                      
+-                                                      ScaffoldMessenger.of(
+-                                                              context)
+-                                                          .showSnackBar(snackbar(
+-                                                              context,
+-                                                              value
+-                                                                  ? add
+-                                                                      ? "playlistBookmarkAddAlert"
+-                                                                          .tr
+-                                                                      : "listBookmarkRemoveAlert"
+-                                                                          .tr
+-                                                                  : "operationFailed"
+-                                                                      .tr,
+-                                                              size: SanckBarSize
+-                                                                  .MEDIUM));
+-                                                    });
+-                                                  },
+-                                                  icon: Icon(playlistController
+-                                                          .isAddedToLibrary
+-                                                          .isFalse
+-                                                      ? Icons.bookmark_add
+-                                                      : Icons.bookmark_added))),
+-                                          // Play button
+-                                          IconButton(
+-                                            tooltip: "play".tr,
+-                                              onPressed: () {
+-                                                playerController.playPlayListSong(
+-                                                    List<MediaItem>.from(
+-                                                        playlistController
+-                                                            .songList),
+-                                                    0,
+-                                                    playfrom: PlaylingFrom(
+-                                                        name: playlistController
+-                                                            .playlist.value.title,
+-                                                        type: PlaylingFromType
+-                                                            .PLAYLIST));
+-                                              },
+-                                              icon: Icon(
+-                                                Icons.play_circle,
+-                                                color: Theme.of(context)
+-                                                    .textTheme
+-                                                    .titleMedium!
+-                                                    .color,
+-                                              )),
+-                                          // Enqueue button
+-                                          IconButton(
+-                                              tooltip: "enqueueSongs".tr,
+-                                              onPressed: () {
+-                                                Get.find<PlayerController>()
+-                                                    .enqueueSongList(
+-                                                        playlistController
+-                                                            .songList
+-                                                            .toList())
+-                                                    .whenComplete(() {
+-                                                  if (context.mounted) {
+-                                                    ScaffoldMessenger.of(context)
+-                                                        .showSnackBar(snackbar(
+-                                                            context,
+-                                                            "songEnqueueAlert".tr,
+-                                                            size: SanckBarSize
+-                                                                .MEDIUM));
+-                                                  }
+-                                                });
+-                                              },
+-                                              icon: Icon(
+-                                                Icons.merge,
+-                                                color: Theme.of(context)
+-                                                    .textTheme
+-                                                    .titleMedium!
+-                                                    .color,
+-                                              )),
+-                                      
+-                                          // Shuffle button
+-                                          IconButton(
+-                                              tooltip: "shuffle".tr,
+-                                              onPressed: () {
+-                                                final songsToplay =
+-                                                    List<MediaItem>.from(
+-                                                        playlistController
+-                                                            .songList);
+-                                                songsToplay.shuffle();
+-                                                songsToplay.shuffle();
+-                                                playerController.playPlayListSong(
+-                                                    songsToplay, 0,
+-                                                    playfrom: PlaylingFrom(
+-                                                        name: playlistController
+-                                                            .playlist.value.title,
+-                                                        type: PlaylingFromType
+-                                                            .PLAYLIST));
+-                                              },
+-                                              icon: Icon(
+-                                                Icons.shuffle,
+-                                                color: Theme.of(context)
+-                                                    .textTheme
+-                                                    .titleMedium!
+-                                                    .color,
+-                                              )),
++                                          ClipRRect(
++                                            borderRadius:
++                                                BorderRadius.circular(4),
++                                            child: Container(
++                                              width: 44,
++                                              height: 44,
++                                              decoration: BoxDecoration(
++                                                  border: Border.all(
++                                                      color: Colors.white54,
++                                                      width: 1.5),
++                                                  borderRadius:
++                                                      BorderRadius.circular(4)),
++                                              child: CachedNetworkImage(
++                                                imageUrl: Thumbnail(
++                                                        pl.thumbnailUrl)
++                                                    .extraHigh,
++                                                fit: BoxFit.cover,
++                                                errorWidget: (_, __, ___) =>
++                                                    const ColoredBox(
++                                                        color: spSurface),
++                                              ),
++                                            ),
++                                          ),
++                                          const SizedBox(width: 6),
+                                           // Download button
+                                           GetX<Downloader>(builder: (controller) {
+                                             final id = playlistController
+                                                 .playlist.value.playlistId;
+                                             return IconButton(
++                                              iconSize: 28,
+                                               tooltip: "downloadPlaylist".tr,
                                                onPressed: () {
--                                                playerController.playPlayListSong(
-+                                                playlistController.markPlayed();
-+                                playerController.playPlayListSong(
-                                                     List<MediaItem>.from(
-                                                         playlistController
-                                                             .songList),
-@@ -366,7 +322,8 @@ class PlaylistScreen extends StatelessWidget {
-                                                             .songList);
-                                                 songsToplay.shuffle();
-                                                 songsToplay.shuffle();
--                                                playerController.playPlayListSong(
-+                                                playlistController.markPlayed();
-+                                playerController.playPlayListSong(
-                                                     songsToplay, 0,
-                                                     playfrom: PlaylingFrom(
-                                                         name: playlistController
-@@ -546,7 +503,8 @@ class PlaylistScreen extends StatelessWidget {
+                                                 if (playlistController
+@@ -450,59 +355,12 @@ class PlaylistScreen extends StatelessWidget {
+                                             );
+                                           }),
+                                       
+-                                          if (playlistController
+-                                              .isAddedToLibrary.isTrue)
++                                          if (pl.isCloudPlaylist)
+                                             IconButton(
+-                                                tooltip:
+-                                                    "syncPlaylistSongs".tr,
+-                                                onPressed: () {
+-                                                  playlistController
+-                                                      .syncPlaylistSongs();
+-                                                },
+-                                                icon:
+-                                                    const Icon(Icons.cloud_sync)),
+-                                          if (playlistController
+-                                              .playlist.value.isPipedPlaylist)
+-                                            IconButton(
+-                                                tooltip:
+-                                                    "blacklistPipedPlaylist".tr,
+-                                                icon: const Icon(
+-                                                  Icons.block,
+-                                                  size: 20,
+-                                                ),
+-                                                splashRadius: 10,
+-                                                onPressed: () {
+-                                                  Get.nestedKey(
+-                                                          ScreenNavigationSetup
+-                                                              .id)!
+-                                                      .currentState!
+-                                                      .pop();
+-                                                  Get.find<
+-                                                          LibraryPlaylistsController>()
+-                                                      .blacklistPipedPlaylist(
+-                                                          playlistController
+-                                                              .playlist.value);
+-                                                  ScaffoldMessenger.of(
+-                                                          Get.context!)
+-                                                      .showSnackBar(snackbar(
+-                                                          Get.context!,
+-                                                          "playlistBlacklistAlert"
+-                                                              .tr,
+-                                                          size: SanckBarSize
+-                                                              .MEDIUM));
+-                                                }),
+-                                          if (playlistController
+-                                              .playlist.value.isCloudPlaylist)
+-                                            IconButton(
+-                                              tooltip:
+-                                                  "sharePlaylist".tr,
+-                                              visualDensity: const VisualDensity(
+-                                                vertical: -3,
+-                                              ),
+-                                              splashRadius: 10,
++                                              iconSize: 26,
++                                              tooltip: "sharePlaylist".tr,
+                                               onPressed: () {
+-                                                final content = playlistController
+-                                                    .playlist.value;
++                                                final content = pl;
+                                                 if (content.isPipedPlaylist) {
+                                                   Share.share(
+                                                       "https://piped.video/playlist?list=${content.playlistId}");
+@@ -513,7 +371,6 @@ class PlaylistScreen extends StatelessWidget {
+                                                           "VL";
+                                                   String url =
+                                                       "https://youtube.com/playlist?list=";
+-                                      
+                                                   url = isPlaylistIdPrefixAvlbl
+                                                       ? url +
+                                                           content.playlistId
+@@ -523,94 +380,94 @@ class PlaylistScreen extends StatelessWidget {
+                                                 }
+                                               },
+                                               icon: const Icon(
+-                                                Icons.share,
+-                                                size: 20,
+-                                              ),
++                                                  Icons.share_outlined),
+                                             ),
+-                                          // Export button - opens export dialog
+                                           IconButton(
++                                            iconSize: 26,
++                                            tooltip: "More",
++                                            onPressed: () =>
++                                                _openMoreSheet(context,
++                                                    playlistController),
++                                            icon: const Icon(Icons.more_vert),
++                                          ),
++                                          const Spacer(),
++                                          // Shuffle (green)
++                                          IconButton(
++                                            iconSize: 30,
++                                            tooltip: "shuffle".tr,
+                                             onPressed: () {
+-                                              showDialog(
+-                                                context: context,
+-                                                builder: (dialogContext) =>
+-                                                    PlaylistExportDialog(
+-                                                  controller: playlistController,
+-                                                  parentContext: context,
+-                                                ),
+-                                              );
++                                              final songsToplay =
++                                                  List<MediaItem>.from(
++                                                      playlistController
++                                                          .songList);
++                                              songsToplay.shuffle();
++                                              songsToplay.shuffle();
++                                              playlistController.markPlayed();
++                                              playerController.playPlayListSong(
++                                                  songsToplay, 0,
++                                                  playfrom: PlaylingFrom(
++                                                      name: pl.title,
++                                                      type: PlaylingFromType
++                                                          .PLAYLIST));
++                                            },
++                                            icon: const Icon(Icons.shuffle,
++                                                color: spGreen),
++                                          ),
++                                          const SizedBox(width: 4),
++                                          // Play (big green circle)
++                                          GestureDetector(
++                                            onTap: () {
++                                              playlistController.markPlayed();
++                                              playerController.playPlayListSong(
++                                                  List<MediaItem>.from(
++                                                      playlistController
++                                                          .songList),
++                                                  0,
++                                                  playfrom: PlaylingFrom(
++                                                      name: pl.title,
++                                                      type: PlaylingFromType
++                                                          .PLAYLIST));
+                                             },
+-                                            icon: const Icon(Icons.file_upload),
+-                                            tooltip: "exportPlaylist".tr,
++                                            child: Container(
++                                              width: 56,
++                                              height: 56,
++                                              decoration: const BoxDecoration(
++                                                  color: spGreen,
++                                                  shape: BoxShape.circle),
++                                              child: const Icon(
++                                                  Icons.play_arrow_rounded,
++                                                  color: Colors.black,
++                                                  size: 36),
++                                            ),
+                                           ),
+                                         ],
                                        ),
                                      ),
-                                   ),
+-                                  ),
 -                                );
-+                                  ),
-+                                ]);
-                               } else if (index == 1) {
-                                 final title =
-                                     playlistController.playlist.value.title;
-@@ -693,7 +651,8 @@ class PlaylistScreen extends StatelessWidget {
-                                     const EdgeInsets.only(left: 20.0, right: 5),
+-                              } else if (index == 1) {
+-                                final title =
+-                                    playlistController.playlist.value.title;
+-                                final description = playlistController
+-                                    .playlist.value.description;
+-
+-                                return AnimatedBuilder(
+-                                  animation:
+-                                      playlistController.animationController,
+-                                  builder: (context, child) {
+-                                    return SizedBox(
+-                                      height: playlistController
+-                                          .heightAnimation.value,
+-                                      child: Transform.scale(
+-                                        scale: playlistController
+-                                            .scaleAnimation.value,
+-                                        child: child,
+-                                      ),
+-                                    );
+-                                  },
+-                                  child: Padding(
+-                                    padding: const EdgeInsets.only(
+-                                        left: 25.0, bottom: 10, right: 30),
+-                                    child: Column(
+-                                      crossAxisAlignment:
+-                                          CrossAxisAlignment.start,
+-                                      children: [
+-                                        Marquee(
+-                                          delay:
+-                                              const Duration(milliseconds: 300),
+-                                          duration: const Duration(seconds: 5),
+-                                          id: title.hashCode.toString(),
+-                                          child: Text(
+-                                            title.length > 50
+-                                                ? title.substring(0, 50)
+-                                                : title,
+-                                            maxLines: 1,
+-                                            style: Theme.of(context)
+-                                                .textTheme
+-                                                .titleLarge!
+-                                                .copyWith(fontSize: 30),
+-                                          ),
+-                                        ),
+-                                        Padding(
+-                                          padding:
+-                                              const EdgeInsets.only(top: 8.0),
+-                                          child: Marquee(
+-                                            delay: const Duration(
+-                                                milliseconds: 300),
+-                                            duration:
+-                                                const Duration(seconds: 5),
+-                                            id: description.hashCode.toString(),
+-                                            child: Text(
+-                                              description ?? "playlist".tr,
+-                                              maxLines: 1,
+-                                              style: Theme.of(context)
+-                                                  .textTheme
+-                                                  .titleSmall,
+-                                            ),
+-                                          ),
+-                                        ),
+-                                      ],
++                                    // Pill buttons: Add / Name & details
++                                    SingleChildScrollView(
++                                      scrollDirection: Axis.horizontal,
++                                      padding: const EdgeInsets.fromLTRB(
++                                          16, 0, 6, 10),
++                                      child: Row(children: [
++                                        SpPillButton(Icons.add, 'Add',
++                                            onTap: () => Get.find<
++                                                    HomeScreenController>()
++                                                .onBottonBarTabSelected(1)),
++                                        if (isLocal)
++                                          SpPillButton(
++                                              Icons.edit_outlined,
++                                              'Name & details',
++                                              onTap: () => showDialog(
++                                                    context: context,
++                                                    builder: (context) =>
++                                                        CreateNRenamePlaylistPopup(
++                                                            renamePlaylist:
++                                                                true,
++                                                            playlist: pl),
++                                                  )),
++                                      ]),
+                                     ),
+-                                  ),
++                                  ],
+                                 );
+                               } else if (index == 2) {
+                                 return SizedBox(
+@@ -626,7 +483,7 @@ class PlaylistScreen extends StatelessWidget {
+                                           tag: playlistController
+                                               .playlist.value.playlistId,
+                                           screenController: playlistController,
+-                                          isSearchFeatureRequired: true,
++                                          isSearchFeatureRequired: false,
+                                           isPlaylistRearrageFeatureRequired: !playlistController
+                                                   .playlist
+                                                   .value
+@@ -690,7 +547,7 @@ class PlaylistScreen extends StatelessWidget {
+ 
+                               return Padding(
+                                 padding:
+-                                    const EdgeInsets.only(left: 20.0, right: 5),
++                                    const EdgeInsets.only(left: 0, right: 0),
                                  child: SongListTile(
                                    onTap: () {
--                                    playerController.playPlayListSong(
-+                                    playlistController.markPlayed();
-+                                playerController.playPlayListSong(
-                                         List<MediaItem>.from(
-                                             playlistController.songList),
-                                         index - 3,
-@@ -703,6 +662,8 @@ class PlaylistScreen extends StatelessWidget {
-                                             type: PlaylingFromType.PLAYLIST));
+                                     playerController.playPlayListSong(
+@@ -704,6 +561,8 @@ class PlaylistScreen extends StatelessWidget {
                                    },
                                    song: playlistController.songList[index - 3],
+                                   isPlaylistOrAlbum: true,
 +                                  compact: true,
 +                                  showThumb: true,
-                                   isPlaylistOrAlbum: true,
                                    playlist: playlistController.playlist.value,
                                  ),
+                               );
+@@ -722,6 +581,107 @@ class PlaylistScreen extends StatelessWidget {
+     );
+   }
+ 
++  /// Bottom sheet behind the ⋮ button: the actions that used to be in the
++  /// old icon row (library bookmark, enqueue, sync, export, ...).
++  Future _openMoreSheet(
++      BuildContext context, PlaylistScreenController playlistController) {
++    final pl = playlistController.playlist.value;
++    return showModalBottomSheet(
++      constraints: const BoxConstraints(maxWidth: 500),
++      shape: const RoundedRectangleBorder(
++        borderRadius: BorderRadius.vertical(top: Radius.circular(10.0)),
++      ),
++      context: Get.find<PlayerController>().homeScaffoldkey.currentState!.context,
++      barrierColor: Colors.transparent.withAlpha(100),
++      builder: (sheetContext) => SafeArea(
++        child: Column(
++          mainAxisSize: MainAxisSize.min,
++          children: [
++            if (!pl.isPipedPlaylist && pl.isCloudPlaylist)
++              ListTile(
++                leading: Icon(playlistController.isAddedToLibrary.isFalse
++                    ? Icons.bookmark_add
++                    : Icons.bookmark_added),
++                title: Text(playlistController.isAddedToLibrary.isFalse
++                    ? "addToLibrary".tr
++                    : "removeFromLibrary".tr),
++                onTap: () {
++                  Navigator.of(sheetContext).pop();
++                  final add = playlistController.isAddedToLibrary.isFalse;
++                  playlistController
++                      .addNremoveFromLibrary(pl, add: add)
++                      .then((value) {
++                    if (!context.mounted) return;
++                    ScaffoldMessenger.of(context).showSnackBar(snackbar(
++                        context,
++                        value
++                            ? add
++                                ? "playlistBookmarkAddAlert".tr
++                                : "listBookmarkRemoveAlert".tr
++                            : "operationFailed".tr,
++                        size: SanckBarSize.MEDIUM));
++                  });
++                },
++              ),
++            ListTile(
++              leading: const Icon(Icons.merge),
++              title: Text("enqueueSongs".tr),
++              onTap: () {
++                Navigator.of(sheetContext).pop();
++                Get.find<PlayerController>()
++                    .enqueueSongList(playlistController.songList.toList())
++                    .whenComplete(() {
++                  if (context.mounted) {
++                    ScaffoldMessenger.of(context).showSnackBar(snackbar(
++                        context, "songEnqueueAlert".tr,
++                        size: SanckBarSize.MEDIUM));
++                  }
++                });
++              },
++            ),
++            if (playlistController.isAddedToLibrary.isTrue)
++              ListTile(
++                leading: const Icon(Icons.cloud_sync),
++                title: Text("syncPlaylistSongs".tr),
++                onTap: () {
++                  Navigator.of(sheetContext).pop();
++                  playlistController.syncPlaylistSongs();
++                },
++              ),
++            if (pl.isPipedPlaylist)
++              ListTile(
++                leading: const Icon(Icons.block),
++                title: Text("blacklistPipedPlaylist".tr),
++                onTap: () {
++                  Navigator.of(sheetContext).pop();
++                  Get.nestedKey(ScreenNavigationSetup.id)!.currentState!.pop();
++                  Get.find<LibraryPlaylistsController>()
++                      .blacklistPipedPlaylist(pl);
++                  ScaffoldMessenger.of(Get.context!).showSnackBar(snackbar(
++                      Get.context!, "playlistBlacklistAlert".tr,
++                      size: SanckBarSize.MEDIUM));
++                },
++              ),
++            ListTile(
++              leading: const Icon(Icons.file_upload),
++              title: Text("exportPlaylist".tr),
++              onTap: () {
++                Navigator.of(sheetContext).pop();
++                showDialog(
++                  context: context,
++                  builder: (dialogContext) => PlaylistExportDialog(
++                    controller: playlistController,
++                    parentContext: context,
++                  ),
++                );
++              },
++            ),
++          ],
++        ),
++      ),
++    );
++  }
++
+   Future openBottomSheet(BuildContext context, MediaItem song) {
+     return showModalBottomSheet(
+       constraints: const BoxConstraints(maxWidth: 500),
 diff --git a/lib/ui/screens/Playlist/playlist_screen_controller.dart b/lib/ui/screens/Playlist/playlist_screen_controller.dart
+index bf116b9..a2374c3 100644
 --- a/lib/ui/screens/Playlist/playlist_screen_controller.dart
 +++ b/lib/ui/screens/Playlist/playlist_screen_controller.dart
-@@ -152,6 +152,12 @@ class PlaylistScreenController extends PlaylistAlbumScreenControllerBase
+@@ -18,6 +18,7 @@ import '../../../models/media_Item_builder.dart';
+ import '../../../models/playlist.dart';
+ import '../../../services/music_service.dart';
+ import '../../../services/piped_service.dart';
++import '../../../services/spotify_service.dart';
+ import '../Home/home_screen_controller.dart';
+ import '../Library/library_controller.dart';
+ 
+@@ -40,6 +41,9 @@ class PlaylistScreenController extends PlaylistAlbumScreenControllerBase
+ 
+   String generatedYtmPlaylistUrl = '';
+ 
++  // Reloads the songs while a Spotify playlist is still being imported.
++  Worker? _spotifyWorker;
++
+   // Title animation
+ 
+   late AnimationController _animationController;
+@@ -67,6 +71,15 @@ class PlaylistScreenController extends PlaylistAlbumScreenControllerBase
+     final Playlist? playlist = args[0];
+     final playlistId = args[1];
+     fetchPlaylistDetails(playlist, playlistId);
++    if ('$playlistId'.startsWith('LIBSP_') &&
++        Get.isRegistered<SpotifyService>()) {
++      final sp = Get.find<SpotifyService>();
++      _spotifyWorker = ever(sp.playlistRevision, (_) {
++        if (sp.lastWrittenPlaylistId == playlistId) {
++          fetchSongsfromDatabase(playlistId);
++        }
++      });
++    }
+     Future.delayed(const Duration(milliseconds: 200),
+         () => Get.find<HomeScreenController>().whenHomeScreenOnTop());
+   }
+@@ -152,6 +165,12 @@ class PlaylistScreenController extends PlaylistAlbumScreenControllerBase
      });
    }
  
@@ -1399,7 +2784,7 @@ diff --git a/lib/ui/screens/Playlist/playlist_screen_controller.dart b/lib/ui/sc
    @override
    Future<bool> checkIfAddedToLibrary(String id) async {
      final box = await Hive.openBox("LibraryPlaylists");
-@@ -174,12 +180,12 @@ class PlaylistScreenController extends PlaylistAlbumScreenControllerBase
+@@ -174,12 +193,12 @@ class PlaylistScreenController extends PlaylistAlbumScreenControllerBase
          final box = await Hive.openBox("LibraryPlaylists");
          final id = content.playlistId;
          if (add) {
@@ -1416,8 +2801,17 @@ diff --git a/lib/ui/screens/Playlist/playlist_screen_controller.dart b/lib/ui/sc
          }
          isAddedToLibrary.value = add;
        }
+@@ -298,6 +317,7 @@ class PlaylistScreenController extends PlaylistAlbumScreenControllerBase
+ 
+   @override
+   void onClose() {
++    _spotifyWorker?.dispose();
+     tempListContainer.clear();
+     _animationController.dispose();
+     Get.find<HomeScreenController>().whenHomeScreenOnTop();
 diff --git a/lib/ui/screens/Search/components/search_song_tile.dart b/lib/ui/screens/Search/components/search_song_tile.dart
 new file mode 100644
+index 0000000..7748419
 --- /dev/null
 +++ b/lib/ui/screens/Search/components/search_song_tile.dart
 @@ -0,0 +1,134 @@
@@ -1556,6 +2950,7 @@ new file mode 100644
 +  }
 +}
 diff --git a/lib/ui/screens/Search/search_screen.dart b/lib/ui/screens/Search/search_screen.dart
+index 5567e2f..114e0cd 100644
 --- a/lib/ui/screens/Search/search_screen.dart
 +++ b/lib/ui/screens/Search/search_screen.dart
 @@ -2,17 +2,33 @@ import 'package:flutter/material.dart';
@@ -1942,6 +3337,7 @@ diff --git a/lib/ui/screens/Search/search_screen.dart b/lib/ui/screens/Search/se
 +  }
  }
 diff --git a/lib/ui/screens/Search/search_screen_controller.dart b/lib/ui/screens/Search/search_screen_controller.dart
+index 1d7bfd9..45ed015 100644
 --- a/lib/ui/screens/Search/search_screen_controller.dart
 +++ b/lib/ui/screens/Search/search_screen_controller.dart
 @@ -1,7 +1,11 @@
@@ -2095,7 +3491,32 @@ diff --git a/lib/ui/screens/Search/search_screen_controller.dart b/lib/ui/screen
      focusNode.dispose();
      textInputController.dispose();
      queryBox.close();
+diff --git a/lib/ui/screens/Settings/settings_screen.dart b/lib/ui/screens/Settings/settings_screen.dart
+index 3daf875..03f7d44 100644
+--- a/lib/ui/screens/Settings/settings_screen.dart
++++ b/lib/ui/screens/Settings/settings_screen.dart
+@@ -303,15 +303,11 @@ class SettingsScreen extends StatelessWidget {
+                                   if (sp.isLoggedIn.value) {
+                                     ScaffoldMessenger.of(context).showSnackBar(
+                                         snackbar(context,
+-                                            "Syncing Spotify in background…",
++                                            "Checking Spotify for missing playlists, albums and artists…",
+                                             size: SanckBarSize.BIG));
+-                                    final err = await sp.importLibrary();
+-                                    if (context.mounted) {
+-                                      ScaffoldMessenger.of(context).showSnackBar(
+-                                          snackbar(context,
+-                                              err ?? "Spotify sync done",
+-                                              size: SanckBarSize.BIG));
+-                                    }
++                                    // runs in the background; new items
++                                    // appear in the library as they are added
++                                    sp.importInBackground();
+                                   } else {
+                                     showDialog(
+                                         context: context,
 diff --git a/lib/ui/screens/Settings/settings_screen_controller.dart b/lib/ui/screens/Settings/settings_screen_controller.dart
+index 4c7d6cb..1d0fddd 100644
 --- a/lib/ui/screens/Settings/settings_screen_controller.dart
 +++ b/lib/ui/screens/Settings/settings_screen_controller.dart
 @@ -84,8 +84,14 @@ class SettingsScreenController extends GetxController {
@@ -2125,6 +3546,7 @@ diff --git a/lib/ui/screens/Settings/settings_screen_controller.dart b/lib/ui/sc
      cacheHomeScreenData.value = setBox.get("cacheHomeScreenData") ?? true;
 diff --git a/lib/ui/utils/cover_color.dart b/lib/ui/utils/cover_color.dart
 new file mode 100644
+index 0000000..29397ac
 --- /dev/null
 +++ b/lib/ui/utils/cover_color.dart
 @@ -0,0 +1,44 @@
@@ -2173,6 +3595,7 @@ new file mode 100644
 +  }
 +}
 diff --git a/lib/ui/widgets/add_to_playlist.dart b/lib/ui/widgets/add_to_playlist.dart
+index 1cf0129..2bd3de1 100644
 --- a/lib/ui/widgets/add_to_playlist.dart
 +++ b/lib/ui/widgets/add_to_playlist.dart
 @@ -8,6 +8,7 @@ import '../../services/piped_service.dart';
@@ -2202,6 +3625,7 @@ diff --git a/lib/ui/widgets/add_to_playlist.dart b/lib/ui/widgets/add_to_playlis
      } else {
        final videosId = songs.map((e) => e.id).toList();
 diff --git a/lib/ui/widgets/animated_screen_transition.dart b/lib/ui/widgets/animated_screen_transition.dart
+index d298bf0..ff5f325 100644
 --- a/lib/ui/widgets/animated_screen_transition.dart
 +++ b/lib/ui/widgets/animated_screen_transition.dart
 @@ -1,6 +1,8 @@
@@ -2252,7 +3676,7 @@ diff --git a/lib/ui/widgets/animated_screen_transition.dart b/lib/ui/widgets/ani
 -          child: child,
 -        );
 -      },
-+      duration: const Duration(milliseconds: 350),
++      duration: const Duration(milliseconds: 180),
 +      transitionBuilder: (child, primaryAnimation, secondaryAnimation) =>
 +          FadeThroughTransition(
 +        animation: primaryAnimation,
@@ -2265,6 +3689,7 @@ diff --git a/lib/ui/widgets/animated_screen_transition.dart b/lib/ui/widgets/ani
    }
 diff --git a/lib/ui/widgets/cover_gradient_background.dart b/lib/ui/widgets/cover_gradient_background.dart
 new file mode 100644
+index 0000000..9a45336
 --- /dev/null
 +++ b/lib/ui/widgets/cover_gradient_background.dart
 @@ -0,0 +1,97 @@
@@ -2313,7 +3738,7 @@ new file mode 100644
 +    final fallback = Color.lerp(canvas, Colors.white, 0.12)!;
 +    return TweenAnimationBuilder<Color?>(
 +      tween: ColorTween(begin: fallback, end: _color ?? fallback),
-+      duration: const Duration(milliseconds: 600),
++      duration: const Duration(milliseconds: 250),
 +      builder: (context, c, _) => Container(
 +        height: widget.height,
 +        decoration: BoxDecoration(
@@ -2365,8 +3790,58 @@ new file mode 100644
 +    );
 +  }
 +}
+diff --git a/lib/ui/widgets/image_widget.dart b/lib/ui/widgets/image_widget.dart
+index 0b9a383..0bc97f3 100644
+--- a/lib/ui/widgets/image_widget.dart
++++ b/lib/ui/widgets/image_widget.dart
+@@ -21,7 +21,9 @@ class ImageWidget extends StatelessWidget {
+     this.artist,
+     required this.size,
+     this.isPlayerArtImage = false,
++    this.squareCorners = false,
+   });
++  final bool squareCorners;
+   final MediaItem? song;
+   final Playlist? playlist;
+   final Album? album;
+@@ -60,7 +62,9 @@ class ImageWidget extends StatelessWidget {
+       clipBehavior: Clip.antiAlias,
+       decoration: BoxDecoration(
+         shape: artist != null ? BoxShape.circle : BoxShape.rectangle,
+-        borderRadius: artist != null ? null : BorderRadius.circular(4),
++        borderRadius: (artist != null || squareCorners)
++            ? null
++            : BorderRadius.circular(4),
+       ),
+       child: offlineAvailable
+           ? Image.file(
+@@ -91,8 +95,9 @@ class ImageWidget extends StatelessWidget {
+                       color: Theme.of(context).colorScheme.secondary,
+                       shape:
+                           artist != null ? BoxShape.circle : BoxShape.rectangle,
+-                      borderRadius:
+-                          artist != null ? null : BorderRadius.circular(10),
++                      borderRadius: (artist != null || squareCorners)
++                          ? null
++                          : BorderRadius.circular(10),
+                     ),
+                     child: Image.asset(
+                         "assets/icons/${song != null ? "song" : artist != null ? "artist" : "album"}.png"));
+@@ -106,8 +111,9 @@ class ImageWidget extends StatelessWidget {
+                     decoration: BoxDecoration(
+                       shape:
+                           artist != null ? BoxShape.circle : BoxShape.rectangle,
+-                      borderRadius:
+-                          artist != null ? null : BorderRadius.circular(10),
++                      borderRadius: (artist != null || squareCorners)
++                          ? null
++                          : BorderRadius.circular(10),
+                       color: Colors.white54,
+                     ),
+                   ))),
 diff --git a/lib/ui/widgets/library_search_overlay.dart b/lib/ui/widgets/library_search_overlay.dart
 new file mode 100644
+index 0000000..59e21f0
 --- /dev/null
 +++ b/lib/ui/widgets/library_search_overlay.dart
 @@ -0,0 +1,197 @@
@@ -2568,6 +4043,7 @@ new file mode 100644
 +  }
 +}
 diff --git a/lib/ui/widgets/song_list_tile.dart b/lib/ui/widgets/song_list_tile.dart
+index c38e3da..7d6efbb 100644
 --- a/lib/ui/widgets/song_list_tile.dart
 +++ b/lib/ui/widgets/song_list_tile.dart
 @@ -21,12 +21,20 @@ class SongListTile extends StatelessWidget with RemoveSongFromPlaylistMixin {
@@ -2591,25 +4067,26 @@ diff --git a/lib/ui/widgets/song_list_tile.dart b/lib/ui/widgets/song_list_tile.
    /// Valid for Album songs
    final bool thumbReplacementWithIndex;
    final int? index;
-@@ -127,8 +135,15 @@ class SongListTile extends StatelessWidget with RemoveSongFromPlaylistMixin {
+@@ -127,8 +135,16 @@ class SongListTile extends StatelessWidget with RemoveSongFromPlaylistMixin {
                  ),
                ).whenComplete(() => Get.delete<SongInfoController>());
              },
 -            contentPadding: const EdgeInsets.only(top: 0, left: 5, right: 30),
 -            leading: thumbReplacementWithIndex
 +            contentPadding: EdgeInsets.only(
-+                top: 0, left: compact ? 15 : 5, right: compact ? 4 : 30),
++                top: 0, left: compact ? 16 : 5, right: compact ? 4 : 30),
 +            dense: compact,
-+            visualDensity:
-+                compact ? const VisualDensity(horizontal: 0, vertical: -2) : null,
-+            minVerticalPadding: compact ? 2 : null,
++            // Spotify row: 48dp art, 64dp tall
++            visualDensity: compact ? VisualDensity.standard : null,
++            horizontalTitleGap: compact ? 12 : null,
++            minVerticalPadding: compact ? 0 : null,
 +            leading: compact
 +                ? (showThumb ? ImageWidget(size: 48, song: song) : null)
 +                : thumbReplacementWithIndex
                  ? SizedBox(
                      width: 27.5,
                      height: 55,
-@@ -147,20 +162,53 @@ class SongListTile extends StatelessWidget with RemoveSongFromPlaylistMixin {
+@@ -147,20 +163,53 @@ class SongListTile extends StatelessWidget with RemoveSongFromPlaylistMixin {
                delay: const Duration(milliseconds: 300),
                duration: const Duration(seconds: 5),
                id: song.title.hashCode.toString(),
@@ -2629,7 +4106,7 @@ diff --git a/lib/ui/widgets/song_list_tile.dart b/lib/ui/widgets/song_list_tile.
 +                      : song.title,
 +                  maxLines: 1,
 +                  style: Theme.of(context).textTheme.titleMedium!.copyWith(
-+                      fontSize: compact ? 15.5 : null,
++                      fontSize: compact ? 16 : null,
 +                      color: playing ? const Color(0xFF1DB954) : null,
 +                      fontWeight: playing
 +                          ? FontWeight.w700
@@ -2644,7 +4121,7 @@ diff --git a/lib/ui/widgets/song_list_tile.dart b/lib/ui/widgets/song_list_tile.
 +              style: Theme.of(context)
 +                  .textTheme
 +                  .titleSmall!
-+                  .copyWith(fontSize: compact ? 13 : null),
++                  .copyWith(fontSize: compact ? 14 : null),
              ),
 -            trailing: SizedBox(
 +            trailing: compact
@@ -2673,6 +4150,7 @@ diff --git a/lib/ui/widgets/song_list_tile.dart b/lib/ui/widgets/song_list_tile.
                child: Row(
                  mainAxisAlignment: MainAxisAlignment.end,
 diff --git a/lib/ui/widgets/sort_widget.dart b/lib/ui/widgets/sort_widget.dart
+index 6744955..2154def 100644
 --- a/lib/ui/widgets/sort_widget.dart
 +++ b/lib/ui/widgets/sort_widget.dart
 @@ -5,7 +5,7 @@ import 'package:get/get.dart';
@@ -2752,3 +4230,85 @@ diff --git a/lib/ui/widgets/sort_widget.dart b/lib/ui/widgets/sort_widget.dart
              ],
            ),
          ),
+diff --git a/lib/ui/widgets/spotify_login_dialog.dart b/lib/ui/widgets/spotify_login_dialog.dart
+index 1f0e460..723db0b 100644
+--- a/lib/ui/widgets/spotify_login_dialog.dart
++++ b/lib/ui/widgets/spotify_login_dialog.dart
+@@ -45,16 +45,11 @@ class _SpotifyLoginDialogState extends State<SpotifyLoginDialog> {
+       if (mounted) setState(() => busy = false);
+       return;
+     }
+-    final err = await sp.importLibrary();
++    // no loading screen: close the dialog and import in the background,
++    // playlists / albums / artists show up in the library as they are added
+     if (!mounted) return;
+-    if (err != null) {
+-      setState(() {
+-        busy = false;
+-        error = err;
+-      });
+-    } else {
+-      Navigator.of(context).pop();
+-    }
++    Navigator.of(context).pop();
++    sp.importInBackground();
+   }
+ 
+   @override
+diff --git a/lib/ui/widgets/spotify_playlist_widgets.dart b/lib/ui/widgets/spotify_playlist_widgets.dart
+index 2ea1642..7e110b6 100644
+--- a/lib/ui/widgets/spotify_playlist_widgets.dart
++++ b/lib/ui/widgets/spotify_playlist_widgets.dart
+@@ -133,7 +133,14 @@ class SpPlaylistHeader extends StatelessWidget {
+         Padding(
+           padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+           child: Row(children: [
+-            const SpAvatar(size: 28, dot: false),
++            Container(
++                width: 32,
++                height: 32,
++                decoration: const BoxDecoration(
++                    color: spSurface, shape: BoxShape.circle),
++                child: const Icon(Icons.add, size: 20)),
++            const SizedBox(width: 6),
++            const SpAvatar(size: 32, dot: false),
+             const SizedBox(width: 10),
+             Text(owner,
+                 style:
+diff --git a/lib/ui/widgets/spotify_style.dart b/lib/ui/widgets/spotify_style.dart
+index ee65689..1abebca 100644
+--- a/lib/ui/widgets/spotify_style.dart
++++ b/lib/ui/widgets/spotify_style.dart
+@@ -169,20 +169,26 @@ class LibEntry {
+     }
+   }
+ 
+-  Widget thumb(double size) {
++  /// [square] drops the rounded corners of playlist / album covers (used by
++  /// the library list).
++  Widget thumb(double size, {bool square = false}) {
++    final radius = square ? BorderRadius.zero : BorderRadius.circular(4);
+     if (kind == 'playlist' && (item as Playlist).playlistId == 'LIBSP_liked') {
+-      return ClipRRect(
+-          borderRadius: BorderRadius.circular(4), child: SpLikedCover(size));
++      return ClipRRect(borderRadius: radius, child: SpLikedCover(size));
+     }
+     final w = kind == 'artist'
+         ? ImageWidget(size: size, artist: item as Artist)
+         : kind == 'album'
+-            ? ImageWidget(size: size, album: item as Album)
+-            : ImageWidget(size: size, playlist: item as Playlist);
++            ? ImageWidget(
++                size: size, album: item as Album, squareCorners: square)
++            : ImageWidget(
++                size: size,
++                playlist: item as Playlist,
++                squareCorners: square);
+     return kind == 'artist'
+         ? ClipOval(child: SizedBox(width: size, height: size, child: w))
+         : ClipRRect(
+-            borderRadius: BorderRadius.circular(4),
++            borderRadius: radius,
+             child: SizedBox(width: size, height: size, child: w));
+   }
+ }
