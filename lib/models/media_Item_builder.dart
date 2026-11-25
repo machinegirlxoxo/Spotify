@@ -1,8 +1,6 @@
 // ignore_for_file: file_names
 
 import 'package:audio_service/audio_service.dart';
-import 'package:harmonymusic/utils/helper.dart';
-import 'package:hive/hive.dart';
 import '../models/thumbnail.dart';
 
 class MediaItemBuilder {
