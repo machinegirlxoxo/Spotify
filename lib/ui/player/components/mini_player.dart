@@ -117,7 +117,7 @@ class MiniPlayer extends StatelessWidget {
                               }
                             },
                             onTap: () {
-                              playerController.playerPanelController.open();
+                              playerController.openPlayerFade();
                             },
                             child: ColoredBox(
                               color: Colors.transparent,
