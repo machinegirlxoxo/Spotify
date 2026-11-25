@@ -71,7 +71,7 @@ class AddToPlaylist extends StatelessWidget {
                     children: [
                       Row(
                         children: [
-                          Radio<String>(value: "piped"),
+                          const Radio<String>(value: "piped"),
                           Text("Piped".tr),
                         ],
                       ),
@@ -80,7 +80,7 @@ class AddToPlaylist extends StatelessWidget {
                       ),
                       Row(
                         children: [
-                          Radio<String>(value: "local"),
+                          const Radio<String>(value: "local"),
                           Text("local".tr),
                         ],
                       )
