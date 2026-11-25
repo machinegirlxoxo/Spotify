@@ -21,11 +21,19 @@ class SongListTile extends StatelessWidget with RemoveSongFromPlaylistMixin {
       this.playlist,
       this.isPlaylistOrAlbum = false,
       this.thumbReplacementWithIndex = false,
+      this.compact = false,
+      this.showThumb = false,
       this.index});
   final Playlist? playlist;
   final MediaItem song;
   final VoidCallback? onTap;
   final bool isPlaylistOrAlbum;
+
+  /// Spotify-like row: no thumbnail/number, always shows the 3-dot menu
+  final bool compact;
+
+  /// with [compact]: keep a small thumbnail (playlists), albums hide it
+  final bool showThumb;
 
   /// Valid for Album songs
   final bool thumbReplacementWithIndex;
@@ -127,8 +135,15 @@ class SongListTile extends StatelessWidget with RemoveSongFromPlaylistMixin {
                 ),
               ).whenComplete(() => Get.delete<SongInfoController>());
             },
-            contentPadding: const EdgeInsets.only(top: 0, left: 5, right: 30),
-            leading: thumbReplacementWithIndex
+            contentPadding: EdgeInsets.only(
+                top: 0, left: compact ? 15 : 5, right: compact ? 4 : 30),
+            dense: compact,
+            visualDensity:
+                compact ? const VisualDensity(horizontal: 0, vertical: -2) : null,
+            minVerticalPadding: compact ? 2 : null,
+            leading: compact
+                ? (showThumb ? ImageWidget(size: 48, song: song) : null)
+                : thumbReplacementWithIndex
                 ? SizedBox(
                     width: 27.5,
                     height: 55,
@@ -147,20 +162,53 @@ class SongListTile extends StatelessWidget with RemoveSongFromPlaylistMixin {
               delay: const Duration(milliseconds: 300),
               duration: const Duration(seconds: 5),
               id: song.title.hashCode.toString(),
-              child: Text(
-                song.title.length > 50
-                    ? song.title.substring(0, 50)
-                    : song.title,
-                maxLines: 1,
-                style: Theme.of(context).textTheme.titleMedium,
-              ),
+              child: Obx(() {
+                final playing = isPlaylistOrAlbum &&
+                    playerController.currentSong.value?.id == song.id;
+                return Text(
+                  song.title.length > 50
+                      ? song.title.substring(0, 50)
+                      : song.title,
+                  maxLines: 1,
+                  style: Theme.of(context).textTheme.titleMedium!.copyWith(
+                      fontSize: compact ? 15.5 : null,
+                      color: playing ? const Color(0xFF1DB954) : null,
+                      fontWeight: playing
+                          ? FontWeight.w700
+                          : (compact ? FontWeight.w400 : null)),
+                );
+              }),
             ),
             subtitle: Text(
               "${song.artist}",
               maxLines: 1,
-              style: Theme.of(context).textTheme.titleSmall,
+              style: Theme.of(context)
+                  .textTheme
+                  .titleSmall!
+                  .copyWith(fontSize: compact ? 13 : null),
             ),
-            trailing: SizedBox(
+            trailing: compact
+                ? IconButton(
+                    splashRadius: 20,
+                    onPressed: () {
+                      showModalBottomSheet(
+                        constraints: const BoxConstraints(maxWidth: 500),
+                        shape: const RoundedRectangleBorder(
+                          borderRadius:
+                              BorderRadius.vertical(top: Radius.circular(10.0)),
+                        ),
+                        isScrollControlled: true,
+                        context: playerController
+                            .homeScaffoldkey.currentState!.context,
+                        barrierColor: Colors.transparent.withAlpha(100),
+                        builder: (context) => SongInfoBottomSheet(
+                          song,
+                          playlist: playlist,
+                        ),
+                      ).whenComplete(() => Get.delete<SongInfoController>());
+                    },
+                    icon: const Icon(Icons.more_vert))
+                : SizedBox(
               width: Get.size.width > 800 ? 80 : 40,
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.end,
