@@ -87,8 +87,7 @@ index 2aee6b4..f73c9b2 100644
 +    String? cover;
 +    final album = data['albumOfTrack'];
 +    try {
-+      final coverArt = album is Map ? album['coverArt'] : null;
-+      final sources = coverArt is Map ? coverArt['sources'] : null;
++      final sources = album is Map ? album['coverArt']?['sources'] : null;
 +      if (sources is List && sources.isNotEmpty) {
 +        // prefer a medium size, fall back to whatever Spotify gives
 +        final pick = sources.length > 1 ? sources[1] : sources.first;
