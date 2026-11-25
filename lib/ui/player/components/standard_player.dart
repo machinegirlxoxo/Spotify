@@ -180,7 +180,7 @@ class StandardPlayer extends StatelessWidget {
                     Icons.keyboard_arrow_down,
                     size: 28,
                   ),
-                  onPressed: playerController.playerPanelController.close,
+                  onPressed: () => playerController.closePlayerFade(),
                 ),
 
                 /// Playing from [Album name]
@@ -194,11 +194,18 @@ class StandardPlayer extends StatelessWidget {
                               style: const TextStyle(
                                   fontSize: 12, fontWeight: FontWeight.bold)),
                           Obx(
-                            () => Text(
-                              "\"${playerController.playinfrom.value.nameString}\"",
-                              overflow: TextOverflow.ellipsis,
-                              style:
-                                  const TextStyle(fontWeight: FontWeight.bold),
+                            () => Marquee(
+                              delay: const Duration(milliseconds: 300),
+                              duration: const Duration(seconds: 5),
+                              id: playerController.playinfrom.value.nameString
+                                  .hashCode
+                                  .toString(),
+                              child: Text(
+                                "\"${playerController.playinfrom.value.nameString}\"",
+                                maxLines: 1,
+                                style: const TextStyle(
+                                    fontWeight: FontWeight.bold),
+                              ),
                             ),
                           )
                         ],
