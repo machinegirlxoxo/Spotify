@@ -254,13 +254,13 @@ class LibraryPlaylistsController extends GetxController
 
   void refreshLib() async {
     final box = await Hive.openBox("LibraryPlaylists");
-    libraryPlaylists.value = [
+    libraryPlaylists.value = _recentsFirst([
       ...initPlst,
       ...(box.values
           .map<Playlist?>((item) => Playlist.fromJson(item))
           .whereType<Playlist>()
           .toList())
-    ];
+    ]);
 
     final appPrefsBox = Hive.box("AppPrefs");
     if (appPrefsBox.containsKey("piped")) {
@@ -269,6 +269,39 @@ class LibraryPlaylistsController extends GetxController
 
     isContentFetched.value = true;
     await box.close();
+  }
+
+  /// playlistId -> last played/opened time (ms since epoch)
+  Map<String, int> _lastPlayedMap() {
+    final raw = Hive.box("AppPrefs").get("playlistLastPlayed");
+    if (raw is Map) {
+      return raw.map((k, v) => MapEntry(k.toString(), (v as num).toInt()));
+    }
+    return {};
+  }
+
+  /// Most recently played playlists first, others keep their order.
+  List<Playlist> _recentsFirst(List<Playlist> list) {
+    final lp = _lastPlayedMap();
+    final indexed = list.asMap().entries.toList();
+    indexed.sort((a, b) {
+      final ta = lp[a.value.playlistId] ?? 0;
+      final tb = lp[b.value.playlistId] ?? 0;
+      if (ta != tb) return tb.compareTo(ta);
+      return a.key.compareTo(b.key);
+    });
+    return indexed.map((e) => e.value).toList();
+  }
+
+  /// Call when a playlist is played/opened so it moves to the top.
+  void markPlayed(String playlistId) {
+    final lp = _lastPlayedMap();
+    lp[playlistId] = DateTime.now().millisecondsSinceEpoch;
+    Hive.box("AppPrefs").put("playlistLastPlayed", lp);
+    final current = libraryPlaylists.toList();
+    if (current.any((e) => e.playlistId == playlistId)) {
+      libraryPlaylists.value = _recentsFirst(current);
+    }
   }
 
   void updatePlaylistIntoDb(Playlist playlist) async {
@@ -428,8 +461,10 @@ class LibraryPlaylistsController extends GetxController
   }
 
   void onSort(SortType sortType, bool isAscending) {
-    final playlists = libraryPlaylists.toList();
-    playlists.removeRange(0, 4);
+    final initIds = initPlst.map((e) => e.playlistId).toSet();
+    final playlists = libraryPlaylists
+        .where((e) => !initIds.contains(e.playlistId))
+        .toList();
     sortPlayLists(playlists, sortType, isAscending);
     playlists.insertAll(0, initPlst);
     libraryPlaylists.value = playlists;
