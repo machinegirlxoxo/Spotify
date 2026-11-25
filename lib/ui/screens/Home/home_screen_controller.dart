@@ -1,5 +1,7 @@
 import 'package:audio_service/audio_service.dart';
 import 'package:flutter/material.dart';
+import '../../widgets/library_search_overlay.dart';
+import '../Search/search_screen_controller.dart';
 import 'package:get/get.dart';
 import 'package:hive/hive.dart';
 
@@ -256,11 +258,19 @@ class HomeScreenController extends GetxController {
   }
 
   void onSideBarTabSelected(int index) {
+    LibrarySearchOverlay.close();
+    if (Get.isRegistered<SearchScreenController>()) {
+      Get.find<SearchScreenController>().resetToLanding();
+    }
     reverseAnimationtransiton = index > tabIndex.value;
     tabIndex.value = index;
   }
 
   void onBottonBarTabSelected(int index) {
+    LibrarySearchOverlay.close();
+    if (Get.isRegistered<SearchScreenController>()) {
+      Get.find<SearchScreenController>().resetToLanding();
+    }
     reverseAnimationtransiton = index > tabIndex.value;
     tabIndex.value = index;
   }
