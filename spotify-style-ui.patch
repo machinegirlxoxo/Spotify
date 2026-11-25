@@ -1,5 +1,36 @@
+diff --git a/lib/services/audio_handler.dart b/lib/services/audio_handler.dart
+index e94b013..7c8b7ac 100644
+--- a/lib/services/audio_handler.dart
++++ b/lib/services/audio_handler.dart
+@@ -26,6 +26,7 @@ import '/services/permission_service.dart';
+ import '../utils/helper.dart';
+ import '/models/media_Item_builder.dart';
+ import '/services/utils.dart';
++import '/services/spotify_service.dart';
+ import '../ui/screens/Settings/settings_screen_controller.dart';
+ import '../ui/screens/Library/library_controller.dart';
+ // ignore: unused_import, implementation_imports, depend_on_referenced_packages
+@@ -777,6 +778,18 @@ class MyAudioHandler extends BaseAudioHandler with GetxServiceMixin {
+   Future<HMStreamingData> checkNGetUrl(String songId,
+       {bool generateNewUrl = false, bool offlineReplacementUrl = false}) async {
+     printINFO("Requested id : $songId");
++    // Songs imported from Spotify are matched to YouTube Music only now.
++    if (songId.startsWith('SP:')) {
++      final videoId = Get.isRegistered<SpotifyService>()
++          ? await Get.find<SpotifyService>().resolveVideoId(songId)
++          : null;
++      if (videoId == null) {
++        return HMStreamingData(
++            playable: false,
++            statusMSG: "Could not find this song on YouTube Music");
++      }
++      songId = videoId;
++    }
+     final songDownloadsBox = Hive.box("SongDownloads");
+     if (!offlineReplacementUrl &&
+         (await Hive.openBox("SongsCache")).containsKey(songId)) {
 diff --git a/lib/services/spotify_service.dart b/lib/services/spotify_service.dart
-index 2aee6b4..6659a14 100644
+index 2aee6b4..f73c9b2 100644
 --- a/lib/services/spotify_service.dart
 +++ b/lib/services/spotify_service.dart
 @@ -3,6 +3,7 @@ import 'dart:convert';
@@ -18,7 +49,7 @@ index 2aee6b4..6659a14 100644
  import '../utils/helper.dart';
  import 'music_service.dart';
  
-@@ -53,6 +55,20 @@ class _Lock {
+@@ -53,6 +55,21 @@ class _Lock {
    }
  }
  
@@ -30,16 +61,17 @@ index 2aee6b4..6659a14 100644
 +}
 +
 +class _SpItem {
-+  _SpItem(this.key, this.name, this.artist);
++  _SpItem(this.key, this.name, this.artist, [this.cover]);
 +  final String key;
 +  final String name;
 +  final String artist;
++  final String? cover;
 +}
 +
  class SpotifyException implements Exception {
    SpotifyException(this.code, this.message);
    final int code;
-@@ -103,7 +119,7 @@ class SpotifyService extends GetxService {
+@@ -103,7 +120,7 @@ class SpotifyService extends GetxService {
    Future<String>? _tokenInFlight;
  
    // Shared limits so parallel playlists don't flood Spotify / YouTube Music.
@@ -48,7 +80,30 @@ index 2aee6b4..6659a14 100644
    final _gqlPool = _Pool(6);
    final _dbLock = _Lock();
  
-@@ -394,8 +410,44 @@ class SpotifyService extends GetxService {
+@@ -334,10 +351,22 @@ class SpotifyService extends GetxService {
+         .toList();
+     int ms = 0;
+     ms = (data['duration']?['totalMilliseconds'] ?? data['durationMs'] ?? 0) as int;
++    String? cover;
++    final album = data['albumOfTrack'];
++    try {
++      final sources = album is Map ? album['coverArt']?['sources'] : null;
++      if (sources is List && sources.isNotEmpty) {
++        // prefer a medium size, fall back to whatever Spotify gives
++        final pick = sources.length > 1 ? sources[1] : sources.first;
++        if (pick is Map && pick['url'] is String) cover = pick['url'];
++      }
++    } catch (_) {}
+     return {
+       'id': '$u'.split(':').last,
+       'name': data['name'] ?? '',
+       'artists': artists,
++      'album': album is Map ? '${album['name'] ?? ''}' : '',
++      'cover': cover,
+       'durationMs': ms,
+       'local': '$u'.contains(':local:'),
+     };
+@@ -394,8 +423,44 @@ class SpotifyService extends GetxService {
        );
  
    // --------------------------------------------------------------- import --
@@ -94,7 +149,7 @@ index 2aee6b4..6659a14 100644
      isImporting.value = true;
      progress.value = 0;
      try {
-@@ -403,7 +455,10 @@ class SpotifyService extends GetxService {
+@@ -403,7 +468,10 @@ class SpotifyService extends GetxService {
        await _refreshHashes();
        final libs = await Future.wait([
          _library('Playlists'),
@@ -106,7 +161,7 @@ index 2aee6b4..6659a14 100644
          _library('Albums').catchError((e) {
            printERROR('Spotify albums fetch failed: $e');
            return <Map>[];
-@@ -420,80 +475,190 @@ class SpotifyService extends GetxService {
+@@ -420,80 +488,191 @@ class SpotifyService extends GetxService {
            .where((w) => '${w['__typename']}'.contains('Album') && w['data'] is Map)
            .toList();
  
@@ -159,7 +214,7 @@ index 2aee6b4..6659a14 100644
 +        final key = 'album:${uri.isNotEmpty ? uri : '$name|$artist'}';
 +        final mapped = meta.get(key);
 +        if (mapped != null && have.$2.contains('$mapped')) continue;
-+        wantedAlbums.add(_SpItem(key, name, artist));
++        wantedAlbums.add(_SpItem(key, name, artist, _firstSource(d['coverArt'])));
 +      }
 +
 +      final wantedArtists = <_SpItem>[];
@@ -171,7 +226,8 @@ index 2aee6b4..6659a14 100644
 +        final key = 'artist:${uri.isNotEmpty ? uri : name}';
 +        final mapped = meta.get(key);
 +        if (mapped != null && have.$3.contains('$mapped')) continue;
-+        wantedArtists.add(_SpItem(key, name, ''));
++        wantedArtists.add(_SpItem(
++            key, name, '', _firstSource(d['visuals']?['avatarImage'])));
 +      }
 +
 +      final totalSteps = wantedPlaylists.length +
@@ -295,7 +351,7 @@ index 2aee6b4..6659a14 100644
 -          tick(name);
 +      for (final a in wantedAlbums) {
 +        light.add(() async {
-+          final album = await _importAlbum(a.name, a.artist);
++          final album = await _importAlbum(a);
 +          if (album != null) {
 +            await meta.put(a.key, album.browseId);
 +            _pushAlbum(album);
@@ -316,7 +372,7 @@ index 2aee6b4..6659a14 100644
 -            done++;
 +      for (final a in wantedArtists) {
 +        light.add(() async {
-+          final artist = await _importArtist(a.name);
++          final artist = await _importArtist(a);
 +          if (artist != null) {
 +            await meta.put(a.key, artist.browseId);
 +            _pushArtist(artist);
@@ -351,7 +407,7 @@ index 2aee6b4..6659a14 100644
        return null;
      } on SpotifyException catch (e) {
        return e.message;
-@@ -504,27 +669,41 @@ class SpotifyService extends GetxService {
+@@ -504,27 +683,41 @@ class SpotifyService extends GetxService {
      }
    }
  
@@ -391,13 +447,13 @@ index 2aee6b4..6659a14 100644
 +    final l = Get.find<LibraryAlbumsController>().libraryAlbums;
 +    if (!l.any((e) => e.browseId == a.browseId)) l.add(a);
 +  }
-+
+ 
 +  void _pushArtist(Artist a) {
 +    if (!Get.isRegistered<LibraryArtistsController>()) return;
 +    final l = Get.find<LibraryArtistsController>().libraryArtists;
 +    if (!l.any((e) => e.browseId == a.browseId)) l.add(a);
 +  }
- 
++
 +  /// Bumped every time a Spotify playlist is written, so an open playlist
 +  /// screen can reload its songs while the import is still running.
 +  final playlistRevision = 0.obs;
@@ -412,7 +468,7 @@ index 2aee6b4..6659a14 100644
      // Hive boxes are opened/closed by name, so keep the writes one at a time.
      await _dbLock.synchronized(() async {
        final listBox = await Hive.openBox(playlistId);
-@@ -540,25 +719,87 @@ class SpotifyService extends GetxService {
+@@ -540,25 +733,106 @@ class SpotifyService extends GetxService {
        final firstThumbnail =
            thumbnails is List && thumbnails.isNotEmpty ? thumbnails.first : null;
        final existingCover = firstThumbnail is Map &&
@@ -453,101 +509,219 @@ index 2aee6b4..6659a14 100644
 +    playlistRevision.value++;
 +  }
 +
++  /// Builds a playable-later song straight from Spotify's own data (no
++  /// YouTube lookup). Its id is `SP:<spotifyId>`; the YouTube Music match is
++  /// only made when the song is played (see [resolveVideoId]).
++  MediaItem _spotifyItem(Map t) {
++    final artists = ((t['artists'] as List?) ?? []).cast<String>();
++    final cover = t['cover'] as String?;
++    final ms = (t['durationMs'] ?? 0) as int;
++    return MediaItem(
++        id: 'SP:${t['id']}',
++        title: '${t['name']}',
++        artist: artists.join(', '),
++        duration: ms > 0 ? Duration(milliseconds: ms) : null,
++        artUri: Uri.parse(
++            (cover != null && cover.isNotEmpty) ? cover : Playlist.thumbPlaceholderUrl),
++        extras: {
++          'url': null,
++          'length': null,
++          'album': null,
++          'artists': [for (final a in artists) {'name': a, 'id': null}],
++          'date': null,
++          'trackDetails': null,
++          'year': null,
++        });
++  }
++
++  /// Turns an `SP:<spotifyId>` song id into a YouTube Music video id the
++  /// first time the song is played, then remembers it. Returns null when no
++  /// match was found.
++  Future<String?> resolveVideoId(String songId) async {
++    if (!songId.startsWith('SP:')) return songId;
++    final spId = songId.substring(3);
++    final matchBox = await Hive.openBox('SpotifyMatches');
++    final cached = matchBox.get(spId);
++    if (cached != null) return MediaItemBuilder.fromJson(cached).id;
++    final info = (await Hive.openBox('SpotifyTracks')).get(spId);
++    if (info == null) return null;
++    final item = await _matchTrack(Map.from(info as Map));
++    if (item == null) return null;
++    matchBox.put(spId, MediaItemBuilder.toJson(item));
++    return item.id;
++  }
++
++  /// Imports a playlist from Spotify's data alone: one write, no per-track
++  /// searching, so even huge playlists appear right away.
 +  /// Returns true when the playlist was written.
 +  Future<bool> _importTrackList(
 +      String playlistId, String title, List<Map> tracks, String? cover) async {
-+    final matchBox = await Hive.openBox('SpotifyMatches');
 +    final meta = await Hive.openBox('SpotifyMeta');
++    final infoBox = await Hive.openBox('SpotifyTracks');
 +    final wanted = tracks
 +        .where((t) => t['id'] != '' && t['local'] != true)
 +        .toList(growable: false);
++    if (wanted.isEmpty && tracks.isNotEmpty) return false;
 +
-+    // Match all tracks in parallel (bounded by the shared pool, earliest
-+    // tracks first). Cached matches return instantly and the order of the
-+    // Spotify playlist is preserved. The first songs are written after a
-+    // handful of matches, then every few dozen, so the playlist is usable
-+    // long before the last track is matched.
-+    final slots = List<MediaItem?>.filled(wanted.length, null);
-+    var finished = 0, flushing = false;
-+    var nextFlush = 8;
-+
-+    Future<void> flushPartial() async {
-+      if (flushing) return;
-+      flushing = true;
-+      try {
-+        nextFlush = finished + 40;
-+        await _writePlaylist(
-+            playlistId, title, slots.whereType<MediaItem>().toList(), cover);
-+      } finally {
-+        flushing = false;
-+      }
-+    }
-+
-+    await Future.wait(List.generate(wanted.length, (i) async {
-+      final t = wanted[i];
-+      MediaItem? item;
-+      final cached = matchBox.get(t['id']);
-+      if (cached != null) {
-+        item = MediaItemBuilder.fromJson(cached);
-+      } else {
-+        item = await _matchPool.run(() => _matchTrack(t));
-+        if (item != null) {
-+          matchBox.put(t['id'], MediaItemBuilder.toJson(item));
++    // what is needed later to find the YouTube version when a song is played
++    await infoBox.putAll({
++      for (final t in wanted)
++        '${t['id']}': {
++          'name': t['name'],
++          'artists': t['artists'],
++          'durationMs': t['durationMs'],
 +        }
-+      }
-+      slots[i] = item;
-+      finished++;
-+      if (finished >= nextFlush && finished < wanted.length) {
-+        await flushPartial();
-+      }
-+    }));
++    });
 +
-+    final matched = slots.whereType<MediaItem>().toList();
-+    if (matched.isEmpty && tracks.isNotEmpty) return false;
-+    // wait for a running partial write, then write the complete list
-+    while (flushing) {
-+      await Future.delayed(const Duration(milliseconds: 20));
-+    }
-+    await _writePlaylist(playlistId, title, matched, cover);
++    final items = wanted.map(_spotifyItem).toList();
++    // keep songs that were already matched to a real YouTube id in older
++    // imports playable without another lookup
++    final matchBox = await Hive.openBox('SpotifyMatches');
++    final resolved = <MediaItem>[
++      for (var i = 0; i < wanted.length; i++)
++        matchBox.get(wanted[i]['id']) != null
++            ? MediaItemBuilder.fromJson(matchBox.get(wanted[i]['id']))
++            : items[i]
++    ];
++    await _writePlaylist(playlistId, title, resolved, cover);
 +    await meta.put('done:$playlistId', true);
 +    return true;
    }
  
    Future<MediaItem?> _matchTrack(Map t) async {
-@@ -582,23 +823,24 @@ class SpotifyService extends GetxService {
+@@ -582,31 +856,123 @@ class SpotifyService extends GetxService {
      }
    }
  
 -  Future<void> _importAlbum(String name, String artist) async {
-+  Future<Album?> _importAlbum(String name, String artist) async {
-     final res = await _matchPool.run(() => Get.find<MusicServices>()
-         .search('$name $artist', filter: 'albums', limit: 3));
-     final album = _firstList(res).whereType<Album>().firstOrNull;
+-    final res = await _matchPool.run(() => Get.find<MusicServices>()
+-        .search('$name $artist', filter: 'albums', limit: 3));
+-    final album = _firstList(res).whereType<Album>().firstOrNull;
 -    if (album == null) return;
-+    if (album == null) return null;
++  /// First image url of a Spotify `{sources: [{url}]}` object.
++  String? _firstSource(dynamic img) {
++    try {
++      final sources = img is Map ? img['sources'] : null;
++      if (sources is List && sources.isNotEmpty) {
++        final pick = sources.length > 1 ? sources[1] : sources.first;
++        if (pick is Map && pick['url'] is String) return pick['url'];
++      }
++    } catch (_) {}
++    return null;
++  }
++
++  /// Adds the album straight from Spotify's data. Its id is `SP:<key>`; the
++  /// YouTube Music page is looked up only when the album is opened
++  /// ([resolveAlbum]).
++  Future<Album?> _importAlbum(_SpItem a) async {
++    final album = Album(
++        title: a.name,
++        browseId: 'SP:${a.key}',
++        artists: [
++          {'name': a.artist}
++        ],
++        description: 'Album',
++        thumbnailUrl: (a.cover != null && a.cover!.isNotEmpty)
++            ? a.cover!
++            : Playlist.thumbPlaceholderUrl);
      await _dbLock.synchronized(() async {
        final box = await Hive.openBox('LibraryAlbums');
        await box.put(album.browseId, album.toJson());
        await box.close();
      });
 +    return album;
++  }
++
++  /// Same for artists: added from Spotify's data, matched when opened
++  /// ([resolveArtist]).
++  Future<Artist?> _importArtist(_SpItem a) async {
++    final artist = Artist(
++        name: a.name,
++        browseId: 'SP:${a.key}',
++        thumbnailUrl: (a.cover != null && a.cover!.isNotEmpty)
++            ? a.cover!
++            : Playlist.thumbPlaceholderUrl);
++    await _dbLock.synchronized(() async {
++      final box = await Hive.openBox('LibraryArtists');
++      await box.put(artist.browseId, artist.toJson());
++      await box.close();
++    });
++    return artist;
++  }
++
++  /// Finds the real YouTube Music album for an `SP:` album, swaps it into the
++  /// library and returns it (null when nothing matches).
++  Future<Album?> resolveAlbum(String id) async {
++    final raw = await _dbLock.synchronized(() async {
++      final box = await Hive.openBox('LibraryAlbums');
++      final v = box.get(id);
++      await box.close();
++      return v;
++    });
++    if (raw == null) return null;
++    final ph = Album.fromJson(raw as Map);
++    final artist = (ph.artists != null && ph.artists!.isNotEmpty)
++        ? '${ph.artists!.first['name'] ?? ''}'
++        : '';
++    final res = await _matchPool.run(() => Get.find<MusicServices>()
++        .search('${ph.title} $artist', filter: 'albums', limit: 3));
++    final real = _firstList(res).whereType<Album>().firstOrNull;
++    if (real == null) return null;
++    await _dbLock.synchronized(() async {
++      final box = await Hive.openBox('LibraryAlbums');
++      await box.delete(id);
++      await box.put(real.browseId, real.toJson());
++      await box.close();
++    });
++    final meta = await Hive.openBox('SpotifyMeta');
++    await meta.put(id.substring(3), real.browseId);
++    if (Get.isRegistered<LibraryAlbumsController>()) {
++      final l = Get.find<LibraryAlbumsController>().libraryAlbums;
++      l.removeWhere((e) => e.browseId == id);
++      if (!l.any((e) => e.browseId == real.browseId)) l.add(real);
++    }
++    return real;
    }
  
 -  Future<void> _importArtist(String name) async {
-+  Future<Artist?> _importArtist(String name) async {
-     final res = await _matchPool.run(() =>
-         Get.find<MusicServices>().search(name, filter: 'artists', limit: 3));
+-    final res = await _matchPool.run(() =>
+-        Get.find<MusicServices>().search(name, filter: 'artists', limit: 3));
++  /// Finds the real YouTube Music artist for an `SP:` artist, swaps it into
++  /// the library and returns it (null when nothing matches).
++  Future<Artist?> resolveArtist(String id) async {
++    final raw = await _dbLock.synchronized(() async {
++      final box = await Hive.openBox('LibraryArtists');
++      final v = box.get(id);
++      await box.close();
++      return v;
++    });
++    if (raw == null) return null;
++    final ph = Artist.fromJson(raw);
++    final res = await _matchPool.run(() => Get.find<MusicServices>()
++        .search(ph.name, filter: 'artists', limit: 3));
      final list = _firstList(res).whereType<Artist>().toList();
 -    if (list.isEmpty) return;
+-    final exact = list.firstWhere(
+-        (a) => a.name.toLowerCase() == name.toLowerCase(),
 +    if (list.isEmpty) return null;
-     final exact = list.firstWhere(
-         (a) => a.name.toLowerCase() == name.toLowerCase(),
++    final real = list.firstWhere(
++        (a) => a.name.toLowerCase() == ph.name.toLowerCase(),
          orElse: () => list.first);
-@@ -607,6 +849,7 @@ class SpotifyService extends GetxService {
-       await box.put(exact.browseId, exact.toJson());
+     await _dbLock.synchronized(() async {
+       final box = await Hive.openBox('LibraryArtists');
+-      await box.put(exact.browseId, exact.toJson());
++      await box.delete(id);
++      await box.put(real.browseId, real.toJson());
        await box.close();
      });
-+    return exact;
++    final meta = await Hive.openBox('SpotifyMeta');
++    await meta.put(id.substring(3), real.browseId);
++    if (Get.isRegistered<LibraryArtistsController>()) {
++      final l = Get.find<LibraryArtistsController>().libraryArtists;
++      l.removeWhere((e) => e.browseId == id);
++      if (!l.any((e) => e.browseId == real.browseId)) l.add(real);
++    }
++    return real;
    }
  
    List _firstList(Map<String, dynamic> res) {
@@ -928,10 +1102,10 @@ index b715f6d..838c842 100644
      if (initFlagForPlayer) {
 diff --git a/lib/ui/screens/Album/album_header.dart b/lib/ui/screens/Album/album_header.dart
 new file mode 100644
-index 0000000..3660221
+index 0000000..1546b04
 --- /dev/null
 +++ b/lib/ui/screens/Album/album_header.dart
-@@ -0,0 +1,231 @@
+@@ -0,0 +1,230 @@
 +import 'package:audio_service/audio_service.dart';
 +import 'package:cached_network_image/cached_network_image.dart';
 +import 'package:flutter/material.dart';
@@ -944,6 +1118,7 @@ index 0000000..3660221
 +import '../../player/player_controller.dart';
 +import '../../widgets/cover_gradient_background.dart';
 +import '../../widgets/snackbar.dart';
++import '../../widgets/spotify_style.dart' show spShufflePlay, toggleSpShufflePlay;
 +import 'album_screen_controller.dart';
 +
 +const spotifyGreen = Color(0xFF1DB954);
@@ -1087,25 +1262,23 @@ index 0000000..3660221
 +                icon: const Icon(Icons.more_vert),
 +              ),
 +              const Spacer(),
-+              // shuffle
-+              IconButton(
-+                tooltip: "shuffle".tr,
-+                onPressed: () {
-+                  final songs = List<MediaItem>.from(controller.songList)
-+                    ..shuffle();
-+                  if (songs.isEmpty) return;
-+                  player.playPlayListSong(songs, 0,
-+                      playfrom: PlaylingFrom(
-+                          name: album.title, type: PlaylingFromType.ALBUM));
-+                },
-+                icon: const Icon(Icons.shuffle, color: spotifyGreen, size: 28),
-+              ),
-+              // big green play
++              // shuffle toggle: grey when off, green when on
++              Obx(() => IconButton(
++                    tooltip: "shuffle".tr,
++                    onPressed: toggleSpShufflePlay,
++                    icon: Icon(Icons.shuffle,
++                        color: spShufflePlay.isTrue
++                            ? spotifyGreen
++                            : Colors.grey,
++                        size: 28),
++                  )),
++              // big green play (shuffled when the toggle is on)
 +              GestureDetector(
 +                onTap: () {
 +                  if (controller.songList.isEmpty) return;
-+                  player.playPlayListSong(
-+                      List<MediaItem>.from(controller.songList), 0,
++                  final songs = List<MediaItem>.from(controller.songList);
++                  if (spShufflePlay.isTrue) songs.shuffle();
++                  player.playPlayListSong(songs, 0,
 +                      playfrom: PlaylingFrom(
 +                          name: album.title, type: PlaylingFromType.ALBUM));
 +                },
@@ -1164,7 +1337,7 @@ index 0000000..3660221
 +  }
 +}
 diff --git a/lib/ui/screens/Album/album_screen.dart b/lib/ui/screens/Album/album_screen.dart
-index e1fd1a4..f301e3c 100644
+index e1fd1a4..4d5b63f 100644
 --- a/lib/ui/screens/Album/album_screen.dart
 +++ b/lib/ui/screens/Album/album_screen.dart
 @@ -15,6 +15,8 @@ import '../../widgets/snackbar.dart';
@@ -1258,7 +1431,17 @@ index e1fd1a4..f301e3c 100644
              Column(
                children: [
                  Container(
-@@ -168,11 +109,7 @@ class AlbumScreen extends StatelessWidget {
+@@ -147,7 +88,8 @@ class AlbumScreen extends StatelessWidget {
+                                     ? albumController.album.value.title
+                                     : "",
+                                 maxLines: 1,
+-                                style: Theme.of(context).textTheme.titleLarge,
++                                style: Theme.of(context).textTheme.titleLarge!.copyWith(
++                                    fontSize: 16, fontWeight: FontWeight.w700),
+                               ),
+                             ),
+                           ),
+@@ -168,11 +110,7 @@ class AlbumScreen extends StatelessWidget {
                            behavior: PlaylistAlbumScrollBehaviour(),
                            child: ListView.builder(
                              padding: EdgeInsets.only(
@@ -1271,7 +1454,7 @@ index e1fd1a4..f301e3c 100644
                                bottom: 200,
                              ),
                              itemCount: albumController.songList.isEmpty
-@@ -180,208 +117,9 @@ class AlbumScreen extends StatelessWidget {
+@@ -180,208 +118,9 @@ class AlbumScreen extends StatelessWidget {
                                  : albumController.songList.length + 3,
                              itemBuilder: (_, index) {
                                if (index == 0) {
@@ -1482,7 +1665,7 @@ index e1fd1a4..f301e3c 100644
                                } else if (index == 2) {
                                  return SizedBox(
                                      height: albumController.isSearchingOn.isTrue
-@@ -456,8 +194,7 @@ class AlbumScreen extends StatelessWidget {
+@@ -456,8 +195,7 @@ class AlbumScreen extends StatelessWidget {
                                      },
                                      song: albumController.songList[index - 3],
                                      isPlaylistOrAlbum: true,
@@ -1493,10 +1676,47 @@ index e1fd1a4..f301e3c 100644
                              },
                            ),
 diff --git a/lib/ui/screens/Album/album_screen_controller.dart b/lib/ui/screens/Album/album_screen_controller.dart
-index 6a98ac5..687c44c 100644
+index 6a98ac5..1d9ab83 100644
 --- a/lib/ui/screens/Album/album_screen_controller.dart
 +++ b/lib/ui/screens/Album/album_screen_controller.dart
-@@ -58,30 +58,35 @@ class AlbumScreenController extends PlaylistAlbumScreenControllerBase
+@@ -9,6 +9,7 @@ import 'package:hive/hive.dart';
+ 
+ import '../../../mixins/additional_opeartion_mixin.dart';
+ import '../../../models/media_Item_builder.dart';
++import '../../../services/spotify_service.dart';
+ import '../Home/home_screen_controller.dart';
+ import '../Library/library_controller.dart';
+ 
+@@ -46,11 +47,27 @@ class AlbumScreenController extends PlaylistAlbumScreenControllerBase
+             parent: animationController, curve: Curves.easeOutBack));
+ 
+     final args = Get.arguments as (Album?, String);
+-    fetchAlbumDetails(args.$1, args.$2);
++    _openAlbum(args.$1, args.$2);
+     Future.delayed(const Duration(milliseconds: 200),
+         () => Get.find<HomeScreenController>().whenHomeScreenOnTop());
+   }
+ 
++  /// Albums imported from Spotify (`SP:` ids) are matched to their
++  /// YouTube Music page the first time they are opened.
++  Future<void> _openAlbum(Album? album_, String albumId) async {
++    if (albumId.startsWith('SP:') && Get.isRegistered<SpotifyService>()) {
++      if (album_ != null) {
++        album.value = album_;
++        animationController.forward();
++      }
++      final real = await Get.find<SpotifyService>().resolveAlbum(albumId);
++      if (real == null) return;
++      fetchAlbumDetails(real, real.browseId);
++      return;
++    }
++    fetchAlbumDetails(album_, albumId);
++  }
++
+   @override
+   void fetchAlbumDetails(Album? album_, String albumId) async {
+     try {
+@@ -58,30 +75,35 @@ class AlbumScreenController extends PlaylistAlbumScreenControllerBase
          album.value = album_;
          animationController.forward();
        }
@@ -1544,6 +1764,39 @@ index 6a98ac5..687c44c 100644
      }
    }
  
+diff --git a/lib/ui/screens/Artists/artist_screen_controller.dart b/lib/ui/screens/Artists/artist_screen_controller.dart
+index cf2e48a..3a46856 100644
+--- a/lib/ui/screens/Artists/artist_screen_controller.dart
++++ b/lib/ui/screens/Artists/artist_screen_controller.dart
+@@ -9,6 +9,7 @@ import '../../../models/artist.dart';
+ import '../../../utils/helper.dart';
+ import '../Library/library_controller.dart';
+ import '/services/music_service.dart';
++import '/services/spotify_service.dart';
+ import '/ui/screens/Home/home_screen_controller.dart';
+ import '/ui/screens/Settings/settings_screen_controller.dart';
+ 
+@@ -60,8 +61,19 @@ class ArtistScreenController extends GetxController
+     super.onReady();
+   }
+ 
+-  _init(bool isIdOnly, dynamic artist) {
++  _init(bool isIdOnly, dynamic artist) async {
+     if (!isIdOnly) artist_ = artist as Artist;
++    // Artists imported from Spotify (`SP:` ids) are matched to YouTube
++    // Music the first time they are opened.
++    final id0 = isIdOnly ? artist as String : artist.browseId as String;
++    if (id0.startsWith('SP:') && Get.isRegistered<SpotifyService>()) {
++      final real = await Get.find<SpotifyService>().resolveArtist(id0);
++      if (real == null) return;
++      artist_ = real;
++      _fetchArtistContent(real.browseId);
++      _checkIfAddedToLibrary(real.browseId);
++      return;
++    }
+     _fetchArtistContent(isIdOnly ? artist as String : artist.browseId);
+     _checkIfAddedToLibrary(isIdOnly ? artist as String : artist.browseId);
+   }
 diff --git a/lib/ui/screens/Home/home_screen_controller.dart b/lib/ui/screens/Home/home_screen_controller.dart
 index 225919c..4109e35 100644
 --- a/lib/ui/screens/Home/home_screen_controller.dart
@@ -1995,21 +2248,22 @@ index 9a387c2..feac912 100644
    late RxList<Album> libraryAlbums = RxList();
    final isContentFetched = false.obs;
 diff --git a/lib/ui/screens/Playlist/playlist_screen.dart b/lib/ui/screens/Playlist/playlist_screen.dart
-index ddb7353..2202c89 100644
+index ddb7353..a29777c 100644
 --- a/lib/ui/screens/Playlist/playlist_screen.dart
 +++ b/lib/ui/screens/Playlist/playlist_screen.dart
-@@ -18,6 +18,10 @@ import '../../widgets/snackbar.dart';
+@@ -18,6 +18,11 @@ import '../../widgets/snackbar.dart';
  import '../../widgets/song_list_tile.dart';
  import '../../widgets/songinfo_bottom_sheet.dart';
  import '../../widgets/sort_widget.dart';
 +import '../../widgets/cover_gradient_background.dart';
 +import '../../widgets/spotify_playlist_widgets.dart';
 +import '../../widgets/spotify_style.dart';
++import '../Album/album_header.dart' show spotifyGreen;
 +import '../Home/home_screen_controller.dart';
  import '../Library/library_controller.dart';
  import 'playlist_screen_controller.dart';
  
-@@ -53,60 +57,14 @@ class PlaylistScreen extends StatelessWidget {
+@@ -53,60 +58,14 @@ class PlaylistScreen extends StatelessWidget {
          },
          child: Stack(
            children: [
@@ -2078,7 +2332,7 @@ index ddb7353..2202c89 100644
              Column(
                children: [
                  Container(
-@@ -128,20 +86,37 @@ class PlaylistScreen extends StatelessWidget {
+@@ -128,20 +87,37 @@ class PlaylistScreen extends StatelessWidget {
                                icon: const Icon(Icons.arrow_back_ios)),
                          ),
                          Expanded(
@@ -2102,7 +2356,7 @@ index ddb7353..2202c89 100644
 +                            final style = Theme.of(context)
 +                                .textTheme
 +                                .titleLarge!
-+                                .copyWith(fontWeight: FontWeight.w700);
++                                .copyWith(fontSize: 16, fontWeight: FontWeight.w700);
 +                            // centred title; only long titles scroll
 +                            return LayoutBuilder(builder: (context, c) {
 +                              final tp = TextPainter(
@@ -2128,7 +2382,7 @@ index ddb7353..2202c89 100644
                          ),
                          if (!playlistController
                                  .playlist.value.isCloudPlaylist &&
-@@ -221,6 +196,8 @@ class PlaylistScreen extends StatelessWidget {
+@@ -221,6 +197,8 @@ class PlaylistScreen extends StatelessWidget {
                                  },
                                  icon: const Icon(Icons.more_vert)),
                            )
@@ -2137,7 +2391,7 @@ index ddb7353..2202c89 100644
                        ],
                      ),
                    ),
-@@ -238,11 +215,7 @@ class PlaylistScreen extends StatelessWidget {
+@@ -238,11 +216,7 @@ class PlaylistScreen extends StatelessWidget {
                            child: ListView.builder(
                              addRepaintBoundaries: false,
                              padding: EdgeInsets.only(
@@ -2150,7 +2404,7 @@ index ddb7353..2202c89 100644
                                bottom: 200,
                              ),
                              itemCount: playlistController.songList.isEmpty ||
-@@ -251,141 +224,73 @@ class PlaylistScreen extends StatelessWidget {
+@@ -251,140 +225,73 @@ class PlaylistScreen extends StatelessWidget {
                                  : playlistController.songList.length + 3,
                              itemBuilder: (_, index) {
                                if (index == 0) {
@@ -2319,6 +2573,8 @@ index ddb7353..2202c89 100644
 -                                                    .titleMedium!
 -                                                    .color,
 -                                              )),
+-                                          // Download button
+-                                          GetX<Downloader>(builder: (controller) {
 +                                          ClipRRect(
 +                                            borderRadius:
 +                                                BorderRadius.circular(4),
@@ -2343,23 +2599,108 @@ index ddb7353..2202c89 100644
 +                                            ),
 +                                          ),
 +                                          const SizedBox(width: 6),
-                                           // Download button
-                                           GetX<Downloader>(builder: (controller) {
++                                          // Download button (same look as the album one)
++                                          GetX<Downloader>(builder: (dl) {
                                              final id = playlistController
                                                  .playlist.value.playlistId;
++                                            final downloading =
++                                                dl.playlistQueue.containsKey(id);
                                              return IconButton(
-+                                              iconSize: 28,
                                                tooltip: "downloadPlaylist".tr,
                                                onPressed: () {
-                                                 if (playlistController
-@@ -450,59 +355,12 @@ class PlaylistScreen extends StatelessWidget {
+@@ -392,117 +299,49 @@ class PlaylistScreen extends StatelessWidget {
+                                                     .isDownloaded.isTrue) {
+                                                   return;
+                                                 }
+-                                                controller.downloadPlaylist(
++                                                dl.downloadPlaylist(
+                                                     id,
+                                                     playlistController.songList
+                                                         .toList());
+                                               },
+                                               icon: playlistController
+                                                       .isDownloaded.isTrue
+-                                                  ? const Icon(
+-                                                      Icons.download_done)
+-                                                  : controller.playlistQueue
+-                                                              .containsKey(id) &&
+-                                                          controller
+-                                                                  .currentPlaylistId
+-                                                                  .toString() ==
+-                                                              id
+-                                                      ? Stack(
+-                                                          children: [
+-                                                            Center(
+-                                                                child: Text(
+-                                                                    "${controller.playlistDownloadingProgress.value}/${playlistController.songList.length}",
+-                                                                    style: Theme.of(
+-                                                                            context)
+-                                                                        .textTheme
+-                                                                        .titleMedium!
+-                                                                        .copyWith(
+-                                                                            fontSize:
+-                                                                                10,
+-                                                                            fontWeight:
+-                                                                                FontWeight.bold))),
+-                                                            const Center(
+-                                                                child:
+-                                                                    LoadingIndicator(
+-                                                              dimension: 30,
+-                                                            ))
+-                                                          ],
+-                                                        )
+-                                                      : controller.playlistQueue
+-                                                              .containsKey(id)
+-                                                          ? const Stack(
+-                                                              children: [
+-                                                                Center(
+-                                                                    child: Icon(
+-                                                                  Icons
+-                                                                      .hourglass_bottom,
+-                                                                  size: 20,
+-                                                                )),
+-                                                                Center(
+-                                                                    child:
+-                                                                        LoadingIndicator(
+-                                                                  dimension: 30,
+-                                                                ))
+-                                                              ],
+-                                                            )
+-                                                          : const Icon(
+-                                                              Icons.download),
++                                                  ? Container(
++                                                      width: 28,
++                                                      height: 28,
++                                                      decoration:
++                                                          const BoxDecoration(
++                                                              color:
++                                                                  spotifyGreen,
++                                                              shape: BoxShape
++                                                                  .circle),
++                                                      child: const Icon(
++                                                          Icons.arrow_downward,
++                                                          size: 18,
++                                                          color: Colors.black),
++                                                    )
++                                                  : downloading
++                                                      ? const SizedBox(
++                                                          width: 26,
++                                                          height: 26,
++                                                          child:
++                                                              CircularProgressIndicator(
++                                                                  strokeWidth:
++                                                                      2.5,
++                                                                  color:
++                                                                      spotifyGreen))
++                                                      : const Icon(
++                                                          Icons.arrow_circle_down,
++                                                          size: 30),
                                              );
                                            }),
                                        
 -                                          if (playlistController
 -                                              .isAddedToLibrary.isTrue)
-+                                          if (pl.isCloudPlaylist)
-                                             IconButton(
+-                                            IconButton(
 -                                                tooltip:
 -                                                    "syncPlaylistSongs".tr,
 -                                                onPressed: () {
@@ -2400,7 +2741,8 @@ index ddb7353..2202c89 100644
 -                                                }),
 -                                          if (playlistController
 -                                              .playlist.value.isCloudPlaylist)
--                                            IconButton(
++                                          if (pl.isCloudPlaylist)
+                                             IconButton(
 -                                              tooltip:
 -                                                  "sharePlaylist".tr,
 -                                              visualDensity: const VisualDensity(
@@ -2416,7 +2758,7 @@ index ddb7353..2202c89 100644
                                                  if (content.isPipedPlaylist) {
                                                    Share.share(
                                                        "https://piped.video/playlist?list=${content.playlistId}");
-@@ -513,7 +371,6 @@ class PlaylistScreen extends StatelessWidget {
+@@ -513,7 +352,6 @@ class PlaylistScreen extends StatelessWidget {
                                                            "VL";
                                                    String url =
                                                        "https://youtube.com/playlist?list=";
@@ -2424,7 +2766,7 @@ index ddb7353..2202c89 100644
                                                    url = isPlaylistIdPrefixAvlbl
                                                        ? url +
                                                            content.playlistId
-@@ -523,94 +380,94 @@ class PlaylistScreen extends StatelessWidget {
+@@ -523,94 +361,88 @@ class PlaylistScreen extends StatelessWidget {
                                                  }
                                                },
                                                icon: const Icon(
@@ -2435,19 +2777,7 @@ index ddb7353..2202c89 100644
                                              ),
 -                                          // Export button - opens export dialog
                                            IconButton(
-+                                            iconSize: 26,
-+                                            tooltip: "More",
-+                                            onPressed: () =>
-+                                                _openMoreSheet(context,
-+                                                    playlistController),
-+                                            icon: const Icon(Icons.more_vert),
-+                                          ),
-+                                          const Spacer(),
-+                                          // Shuffle (green)
-+                                          IconButton(
-+                                            iconSize: 30,
-+                                            tooltip: "shuffle".tr,
-                                             onPressed: () {
+-                                            onPressed: () {
 -                                              showDialog(
 -                                                context: context,
 -                                                builder: (dialogContext) =>
@@ -2456,32 +2786,39 @@ index ddb7353..2202c89 100644
 -                                                  parentContext: context,
 -                                                ),
 -                                              );
-+                                              final songsToplay =
-+                                                  List<MediaItem>.from(
-+                                                      playlistController
-+                                                          .songList);
-+                                              songsToplay.shuffle();
-+                                              songsToplay.shuffle();
-+                                              playlistController.markPlayed();
-+                                              playerController.playPlayListSong(
-+                                                  songsToplay, 0,
-+                                                  playfrom: PlaylingFrom(
-+                                                      name: pl.title,
-+                                                      type: PlaylingFromType
-+                                                          .PLAYLIST));
-+                                            },
-+                                            icon: const Icon(Icons.shuffle,
-+                                                color: spGreen),
++                                            iconSize: 26,
++                                            tooltip: "More",
++                                            onPressed: () =>
++                                                _openMoreSheet(context,
++                                                    playlistController),
++                                            icon: const Icon(Icons.more_vert),
 +                                          ),
++                                          const Spacer(),
++                                          // Shuffle toggle: grey when off, green when on
++                                          Obx(() => IconButton(
++                                                iconSize: 30,
++                                                tooltip: "shuffle".tr,
++                                                onPressed: toggleSpShufflePlay,
++                                                icon: Icon(Icons.shuffle,
++                                                    color: spShufflePlay.isTrue
++                                                        ? spGreen
++                                                        : Colors.grey),
++                                              )),
 +                                          const SizedBox(width: 4),
 +                                          // Play (big green circle)
 +                                          GestureDetector(
 +                                            onTap: () {
 +                                              playlistController.markPlayed();
-+                                              playerController.playPlayListSong(
++                                              final songsToPlay =
 +                                                  List<MediaItem>.from(
 +                                                      playlistController
-+                                                          .songList),
++                                                          .songList);
++                                              // shuffled only when the toggle is on
++                                              if (spShufflePlay.isTrue) {
++                                                songsToPlay.shuffle();
++                                              }
++                                              playerController.playPlayListSong(
++                                                  songsToPlay,
 +                                                  0,
 +                                                  playfrom: PlaylingFrom(
 +                                                      name: pl.title,
@@ -2598,7 +2935,7 @@ index ddb7353..2202c89 100644
                                  );
                                } else if (index == 2) {
                                  return SizedBox(
-@@ -626,7 +483,7 @@ class PlaylistScreen extends StatelessWidget {
+@@ -626,7 +458,7 @@ class PlaylistScreen extends StatelessWidget {
                                            tag: playlistController
                                                .playlist.value.playlistId,
                                            screenController: playlistController,
@@ -2607,7 +2944,7 @@ index ddb7353..2202c89 100644
                                            isPlaylistRearrageFeatureRequired: !playlistController
                                                    .playlist
                                                    .value
-@@ -690,7 +547,7 @@ class PlaylistScreen extends StatelessWidget {
+@@ -690,7 +522,7 @@ class PlaylistScreen extends StatelessWidget {
  
                                return Padding(
                                  padding:
@@ -2616,7 +2953,7 @@ index ddb7353..2202c89 100644
                                  child: SongListTile(
                                    onTap: () {
                                      playerController.playPlayListSong(
-@@ -704,6 +561,8 @@ class PlaylistScreen extends StatelessWidget {
+@@ -704,6 +536,8 @@ class PlaylistScreen extends StatelessWidget {
                                    },
                                    song: playlistController.songList[index - 3],
                                    isPlaylistOrAlbum: true,
@@ -2625,7 +2962,7 @@ index ddb7353..2202c89 100644
                                    playlist: playlistController.playlist.value,
                                  ),
                                );
-@@ -722,6 +581,107 @@ class PlaylistScreen extends StatelessWidget {
+@@ -722,6 +556,107 @@ class PlaylistScreen extends StatelessWidget {
      );
    }
  
@@ -3625,19 +3962,19 @@ index 1cf0129..2bd3de1 100644
      } else {
        final videosId = songs.map((e) => e.id).toList();
 diff --git a/lib/ui/widgets/animated_screen_transition.dart b/lib/ui/widgets/animated_screen_transition.dart
-index d298bf0..ff5f325 100644
+index d298bf0..ca561e0 100644
 --- a/lib/ui/widgets/animated_screen_transition.dart
 +++ b/lib/ui/widgets/animated_screen_transition.dart
 @@ -1,6 +1,8 @@
  import 'package:animations/animations.dart';
  import 'package:flutter/material.dart';
  
-+/// Tab switch: current tab fades out to black, next tab fades in.
++/// Tab switch: current tab fades out to black, next tab fades in (no zoom).
 +/// (the horizontal/reverse flags are kept for API compatibility)
  class AnimatedScreenTransition extends StatelessWidget {
    const AnimatedScreenTransition(
        {super.key,
-@@ -16,41 +18,15 @@ class AnimatedScreenTransition extends StatelessWidget {
+@@ -16,39 +18,23 @@ class AnimatedScreenTransition extends StatelessWidget {
    @override
    Widget build(BuildContext context) {
      if (!enabled) return child;
@@ -3662,31 +3999,35 @@ index d298bf0..ff5f325 100644
 -      duration: horizontalTransition
 -          ? const Duration(milliseconds: 400)
 -          : const Duration(milliseconds: 450),
--      transitionBuilder: (child, primaryAnimation, secondaryAnimation) {
++      duration: const Duration(milliseconds: 180),
++      // plain fade: the old tab fades out, then the new one fades in
++      // (no zoom / scale)
+       transitionBuilder: (child, primaryAnimation, secondaryAnimation) {
 -        return DualTransitionBuilder(
 -          animation: primaryAnimation,
 -          forwardBuilder: (context, animation, child) => SlideTransition(
 -            position: forwardTween.animate(CurvedAnimation(parent: primaryAnimation, curve: Curves.easeOutCubic)),
 -            child: child,
--          ),
++        final fadeIn = CurvedAnimation(
++            parent: primaryAnimation,
++            curve: const Interval(0.5, 1.0, curve: Curves.easeOut));
++        final fadeOut = ReverseAnimation(CurvedAnimation(
++            parent: secondaryAnimation,
++            curve: const Interval(0.0, 0.5, curve: Curves.easeIn)));
++        return FadeTransition(
++          opacity: fadeIn,
++          child: ColoredBox(
++            color: Colors.black,
++            child: FadeTransition(opacity: fadeOut, child: child),
+           ),
 -          reverseBuilder: (context, animation, child) => SlideTransition(
 -            position: reverseTween.animate(CurvedAnimation(parent: secondaryAnimation, curve: Curves.easeOutCubic)),
 -            child: child,
 -          ),
 -          child: child,
--        );
--      },
-+      duration: const Duration(milliseconds: 180),
-+      transitionBuilder: (child, primaryAnimation, secondaryAnimation) =>
-+          FadeThroughTransition(
-+        animation: primaryAnimation,
-+        secondaryAnimation: secondaryAnimation,
-+        fillColor: Colors.black,
-+        child: child,
-+      ),
+         );
+       },
        child: child,
-     );
-   }
 diff --git a/lib/ui/widgets/cover_gradient_background.dart b/lib/ui/widgets/cover_gradient_background.dart
 new file mode 100644
 index 0000000..9a45336
@@ -4276,10 +4617,35 @@ index 2ea1642..7e110b6 100644
              Text(owner,
                  style:
 diff --git a/lib/ui/widgets/spotify_style.dart b/lib/ui/widgets/spotify_style.dart
-index ee65689..1abebca 100644
+index ee65689..a7a8b0c 100644
 --- a/lib/ui/widgets/spotify_style.dart
 +++ b/lib/ui/widgets/spotify_style.dart
-@@ -169,20 +169,26 @@ class LibEntry {
+@@ -1,5 +1,6 @@
+ import 'package:flutter/material.dart';
+ import 'package:get/get.dart';
++import 'package:hive/hive.dart';
+ 
+ import '../../models/album.dart';
+ import '../../models/artist.dart';
+@@ -16,6 +17,17 @@ const spGrey = Color(0xFFB3B3B3);
+ const spBg = Color(0xFF121212);
+ const spBlue = Color(0xFF3D91F4);
+ 
++/// "Shuffle play" toggle shared by the album and playlist screens. It only
++/// switches the mode; the big green play button then plays shuffled or in
++/// order depending on it.
++final RxBool spShufflePlay =
++    RxBool((Hive.box('AppPrefs').get('spShufflePlay') ?? false) as bool);
++
++void toggleSpShufflePlay() {
++  spShufflePlay.toggle();
++  Hive.box('AppPrefs').put('spShufflePlay', spShufflePlay.value);
++}
++
+ /// Darkened, saturated version of [base] (the dynamic album colour) used for
+ /// the player gradient, the mini player card and the lyrics preview card.
+ Color spTint(Color? base, {double lightness = 0.28}) {
+@@ -169,20 +181,26 @@ class LibEntry {
      }
    }
  
