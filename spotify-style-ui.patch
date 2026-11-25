@@ -80,14 +80,15 @@ index 2aee6b4..f73c9b2 100644
    final _gqlPool = _Pool(6);
    final _dbLock = _Lock();
  
-@@ -334,10 +351,22 @@ class SpotifyService extends GetxService {
+@@ -334,10 +351,23 @@ class SpotifyService extends GetxService {
          .toList();
      int ms = 0;
      ms = (data['duration']?['totalMilliseconds'] ?? data['durationMs'] ?? 0) as int;
 +    String? cover;
 +    final album = data['albumOfTrack'];
 +    try {
-+      final sources = album is Map ? album['coverArt']?['sources'] : null;
++      final coverArt = album is Map ? album['coverArt'] : null;
++      final sources = coverArt is Map ? coverArt['sources'] : null;
 +      if (sources is List && sources.isNotEmpty) {
 +        // prefer a medium size, fall back to whatever Spotify gives
 +        final pick = sources.length > 1 ? sources[1] : sources.first;
@@ -103,7 +104,7 @@ index 2aee6b4..f73c9b2 100644
        'durationMs': ms,
        'local': '$u'.contains(':local:'),
      };
-@@ -394,8 +423,44 @@ class SpotifyService extends GetxService {
+@@ -394,8 +424,44 @@ class SpotifyService extends GetxService {
        );
  
    // --------------------------------------------------------------- import --
@@ -149,7 +150,7 @@ index 2aee6b4..f73c9b2 100644
      isImporting.value = true;
      progress.value = 0;
      try {
-@@ -403,7 +468,10 @@ class SpotifyService extends GetxService {
+@@ -403,7 +469,10 @@ class SpotifyService extends GetxService {
        await _refreshHashes();
        final libs = await Future.wait([
          _library('Playlists'),
@@ -161,7 +162,7 @@ index 2aee6b4..f73c9b2 100644
          _library('Albums').catchError((e) {
            printERROR('Spotify albums fetch failed: $e');
            return <Map>[];
-@@ -420,80 +488,191 @@ class SpotifyService extends GetxService {
+@@ -420,80 +489,191 @@ class SpotifyService extends GetxService {
            .where((w) => '${w['__typename']}'.contains('Album') && w['data'] is Map)
            .toList();
  
@@ -407,7 +408,7 @@ index 2aee6b4..f73c9b2 100644
        return null;
      } on SpotifyException catch (e) {
        return e.message;
-@@ -504,27 +683,41 @@ class SpotifyService extends GetxService {
+@@ -504,27 +684,41 @@ class SpotifyService extends GetxService {
      }
    }
  
@@ -468,7 +469,7 @@ index 2aee6b4..f73c9b2 100644
      // Hive boxes are opened/closed by name, so keep the writes one at a time.
      await _dbLock.synchronized(() async {
        final listBox = await Hive.openBox(playlistId);
-@@ -540,25 +733,106 @@ class SpotifyService extends GetxService {
+@@ -540,25 +734,106 @@ class SpotifyService extends GetxService {
        final firstThumbnail =
            thumbnails is List && thumbnails.isNotEmpty ? thumbnails.first : null;
        final existingCover = firstThumbnail is Map &&
@@ -589,7 +590,7 @@ index 2aee6b4..f73c9b2 100644
    }
  
    Future<MediaItem?> _matchTrack(Map t) async {
-@@ -582,31 +856,123 @@ class SpotifyService extends GetxService {
+@@ -582,31 +857,123 @@ class SpotifyService extends GetxService {
      }
    }
  
